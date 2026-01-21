@@ -10,6 +10,7 @@ class EffectsWindow(QtWidgets.QWidget):
     client_area_changed = QtCore.pyqtSignal(bool)
     dxcam_async_changed = QtCore.pyqtSignal(bool)
     crop_changed = QtCore.pyqtSignal(int, int, int, int)
+    blob_changed = QtCore.pyqtSignal(dict)
     backend_changed = QtCore.pyqtSignal(str)
     effects_backend_changed = QtCore.pyqtSignal(str)
 
@@ -37,6 +38,29 @@ class EffectsWindow(QtWidgets.QWidget):
         self.crop_top = self._make_spinbox()
         self.crop_right = self._make_spinbox()
         self.crop_bottom = self._make_spinbox()
+        self.blob_group = QtWidgets.QGroupBox("Blob tracker")
+        self.blob_group.setCheckable(True)
+        self.blob_group.setChecked(False)
+        self.blob_threshold = self._make_spinbox(0, 255, 25)
+        self.blob_min_area = self._make_spinbox(0, 2000000, 600)
+        self.blob_max_area = self._make_spinbox(0, 2000000, 0)
+        self.blob_min_w = self._make_spinbox(0, 10000, 10)
+        self.blob_min_h = self._make_spinbox(0, 10000, 10)
+        self.blob_blur = self._make_spinbox(0, 31, 5)
+        self.blob_dilate = self._make_spinbox(0, 10, 2)
+        self.blob_erode = self._make_spinbox(0, 10, 0)
+        self.blob_scale = self._make_spinbox(10, 100, 50)
+        self.blob_max_blobs = self._make_spinbox(1, 100, 10)
+        self.blob_skip = self._make_spinbox(0, 30, 0)
+        self.blob_fps = self._make_spinbox(1, 120, 15)
+        self.blob_alpha = self._make_spinbox(0, 100, 0)
+        self.blob_show_boxes = QtWidgets.QCheckBox("Afficher rectangles")
+        self.blob_show_centers = QtWidgets.QCheckBox("Afficher centres")
+        self.blob_show_mask = QtWidgets.QCheckBox("Afficher masque")
+        self.blob_line = self._make_spinbox(1, 10, 2)
+        self.blob_r = self._make_spinbox(0, 255, 0)
+        self.blob_g = self._make_spinbox(0, 255, 255)
+        self.blob_b = self._make_spinbox(0, 255, 0)
 
         self.backend_combo = QtWidgets.QComboBox()
         self.backend_combo.addItem("MSS", "mss")
@@ -83,6 +107,7 @@ class EffectsWindow(QtWidgets.QWidget):
         effects_form.addRow("Luminosite", self.brightness_slider)
         effects_form.addRow("Contraste", self.contrast_slider)
         effects_form.addRow("Backend effets", self.effects_combo)
+        effects_form.addRow(self._build_blob_group())
 
         rec_widget = QtWidgets.QWidget()
         rec_widget.setLayout(rec_form)
@@ -115,6 +140,27 @@ class EffectsWindow(QtWidgets.QWidget):
         self.crop_bottom.valueChanged.connect(self._emit_crop)
         self.backend_combo.currentIndexChanged.connect(self._emit_backend)
         self.effects_combo.currentIndexChanged.connect(self._emit_effects_backend)
+        self.blob_group.toggled.connect(self._emit_blob)
+        self.blob_threshold.valueChanged.connect(self._emit_blob)
+        self.blob_min_area.valueChanged.connect(self._emit_blob)
+        self.blob_max_area.valueChanged.connect(self._emit_blob)
+        self.blob_min_w.valueChanged.connect(self._emit_blob)
+        self.blob_min_h.valueChanged.connect(self._emit_blob)
+        self.blob_blur.valueChanged.connect(self._emit_blob)
+        self.blob_dilate.valueChanged.connect(self._emit_blob)
+        self.blob_erode.valueChanged.connect(self._emit_blob)
+        self.blob_scale.valueChanged.connect(self._emit_blob)
+        self.blob_max_blobs.valueChanged.connect(self._emit_blob)
+        self.blob_skip.valueChanged.connect(self._emit_blob)
+        self.blob_fps.valueChanged.connect(self._emit_blob)
+        self.blob_alpha.valueChanged.connect(self._emit_blob)
+        self.blob_show_boxes.toggled.connect(self._emit_blob)
+        self.blob_show_centers.toggled.connect(self._emit_blob)
+        self.blob_show_mask.toggled.connect(self._emit_blob)
+        self.blob_line.valueChanged.connect(self._emit_blob)
+        self.blob_r.valueChanged.connect(self._emit_blob)
+        self.blob_g.valueChanged.connect(self._emit_blob)
+        self.blob_b.valueChanged.connect(self._emit_blob)
 
     def emit_current(self) -> None:
         self._emit_effects()
@@ -125,6 +171,7 @@ class EffectsWindow(QtWidgets.QWidget):
         self._emit_client()
         self._emit_dxcam_async()
         self._emit_crop()
+        self._emit_blob()
         self._emit_backend()
         self._emit_effects_backend()
 
@@ -136,12 +183,11 @@ class EffectsWindow(QtWidgets.QWidget):
         slider.setSingleStep(1)
         return slider
 
-    def _make_spinbox(self) -> QtWidgets.QSpinBox:
+    def _make_spinbox(self, minv: int = 0, maxv: int = 10000, val: int = 0) -> QtWidgets.QSpinBox:
         box = QtWidgets.QSpinBox()
-        box.setRange(0, 10000)
+        box.setRange(minv, maxv)
         box.setSingleStep(1)
-        box.setValue(0)
-        box.setSuffix(" px")
+        box.setValue(val)
         return box
 
     def _build_crop_widget(self) -> QtWidgets.QWidget:
@@ -158,6 +204,57 @@ class EffectsWindow(QtWidgets.QWidget):
         container = QtWidgets.QWidget()
         container.setLayout(grid)
         return container
+
+    def _build_blob_group(self) -> QtWidgets.QWidget:
+        grid = QtWidgets.QGridLayout()
+        grid.addWidget(QtWidgets.QLabel("Seuil"), 0, 0)
+        grid.addWidget(self.blob_threshold, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Min zone"), 0, 2)
+        grid.addWidget(self.blob_min_area, 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Max zone"), 1, 0)
+        grid.addWidget(self.blob_max_area, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("Min L/H"), 1, 2)
+        min_size = QtWidgets.QHBoxLayout()
+        min_size.addWidget(self.blob_min_w)
+        min_size.addWidget(self.blob_min_h)
+        min_size_widget = QtWidgets.QWidget()
+        min_size_widget.setLayout(min_size)
+        grid.addWidget(min_size_widget, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Flou"), 2, 0)
+        grid.addWidget(self.blob_blur, 2, 1)
+        grid.addWidget(QtWidgets.QLabel("Dilate/Erode"), 2, 2)
+        morph = QtWidgets.QHBoxLayout()
+        morph.addWidget(self.blob_dilate)
+        morph.addWidget(self.blob_erode)
+        morph_widget = QtWidgets.QWidget()
+        morph_widget.setLayout(morph)
+        grid.addWidget(morph_widget, 2, 3)
+        grid.addWidget(QtWidgets.QLabel("Echelle %"), 3, 0)
+        grid.addWidget(self.blob_scale, 3, 1)
+        grid.addWidget(QtWidgets.QLabel("Max blobs"), 3, 2)
+        grid.addWidget(self.blob_max_blobs, 3, 3)
+        grid.addWidget(QtWidgets.QLabel("Skip frames"), 4, 0)
+        grid.addWidget(self.blob_skip, 4, 1)
+        grid.addWidget(QtWidgets.QLabel("Lissage %"), 4, 2)
+        grid.addWidget(self.blob_alpha, 4, 3)
+        grid.addWidget(QtWidgets.QLabel("FPS blob"), 5, 0)
+        grid.addWidget(self.blob_fps, 5, 1)
+        grid.addWidget(self.blob_show_boxes, 6, 0)
+        grid.addWidget(self.blob_show_centers, 6, 1)
+        grid.addWidget(self.blob_show_mask, 6, 2)
+        grid.addWidget(QtWidgets.QLabel("Epaisseur"), 7, 0)
+        grid.addWidget(self.blob_line, 7, 1)
+        grid.addWidget(QtWidgets.QLabel("Couleur RGB"), 7, 2)
+        colors = QtWidgets.QHBoxLayout()
+        colors.addWidget(self.blob_r)
+        colors.addWidget(self.blob_g)
+        colors.addWidget(self.blob_b)
+        colors_widget = QtWidgets.QWidget()
+        colors_widget.setLayout(colors)
+        grid.addWidget(colors_widget, 7, 3)
+        grid.setContentsMargins(4, 4, 4, 4)
+        self.blob_group.setLayout(grid)
+        return self.blob_group
 
     def _make_section(self, title: str, content: QtWidgets.QWidget) -> QtWidgets.QWidget:
         toggle = QtWidgets.QToolButton()
@@ -232,6 +329,11 @@ class EffectsWindow(QtWidgets.QWidget):
         self._update_fps_value()
         self._update_scale_value()
 
+        self.blob_show_boxes.setChecked(True)
+        self.blob_show_centers.setChecked(False)
+        self.blob_show_mask.setChecked(False)
+        self.blob_fps.setValue(15)
+
     def _emit_effects(self) -> None:
         brightness = self.brightness_slider.value() / 100.0
         contrast = self.contrast_slider.value() / 100.0
@@ -262,6 +364,30 @@ class EffectsWindow(QtWidgets.QWidget):
 
     def _emit_dxcam_async(self) -> None:
         self.dxcam_async_changed.emit(self.dxcam_async_checkbox.isChecked())
+
+    def _emit_blob(self) -> None:
+        params = {
+            "enabled": self.blob_group.isChecked(),
+            "threshold": self.blob_threshold.value(),
+            "min_area": self.blob_min_area.value(),
+            "max_area": self.blob_max_area.value(),
+            "min_w": self.blob_min_w.value(),
+            "min_h": self.blob_min_h.value(),
+            "blur": self.blob_blur.value(),
+            "dilate": self.blob_dilate.value(),
+            "erode": self.blob_erode.value(),
+            "scale": self.blob_scale.value(),
+            "max_blobs": self.blob_max_blobs.value(),
+            "skip": self.blob_skip.value(),
+            "max_fps": self.blob_fps.value(),
+            "alpha": self.blob_alpha.value() / 100.0,
+            "show_boxes": self.blob_show_boxes.isChecked(),
+            "show_centers": self.blob_show_centers.isChecked(),
+            "show_mask": self.blob_show_mask.isChecked(),
+            "line": self.blob_line.value(),
+            "color": (self.blob_r.value(), self.blob_g.value(), self.blob_b.value()),
+        }
+        self.blob_changed.emit(params)
 
     def _emit_crop(self) -> None:
         self.crop_changed.emit(

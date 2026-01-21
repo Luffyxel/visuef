@@ -8,6 +8,7 @@ from stream_window import StreamWindow, DXCAM_AVAILABLE, NUMPY_AVAILABLE, OPENCV
 from gl_view import GL_AVAILABLE
 from wgc_capture import WGC_AVAILABLE
 from window_utils import list_windows
+from logger_utils import setup_logging
 
 
 class SelectorWindow(QtWidgets.QWidget):
@@ -76,6 +77,7 @@ class SelectorWindow(QtWidgets.QWidget):
         self.effects_win.client_area_changed.connect(self.stream_win.set_capture_client_area)
         self.effects_win.dxcam_async_changed.connect(self.stream_win.set_dxcam_async)
         self.effects_win.crop_changed.connect(self.stream_win.set_crop)
+        self.effects_win.blob_changed.connect(self.stream_win.set_blob_params)
         self.effects_win.backend_changed.connect(self.stream_win.set_capture_backend)
         self.effects_win.effects_backend_changed.connect(self.stream_win.set_effects_backend)
         self.stream_win.fps_updated.connect(self.effects_win.set_actual_fps)
@@ -87,6 +89,7 @@ class SelectorWindow(QtWidgets.QWidget):
 
 
 def main() -> int:
+    setup_logging()
     app = QtWidgets.QApplication(sys.argv)
     selector = SelectorWindow()
     selector.show()

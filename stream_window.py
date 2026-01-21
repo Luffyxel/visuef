@@ -1,4 +1,6 @@
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 import mss
@@ -8,6 +10,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 from gl_view import GLFrameView, GL_AVAILABLE
 from wgc_capture import WGCCapture, WGC_AVAILABLE
+from logger_utils import get_logger
 
 try:
     import dxcam
@@ -42,9 +45,20 @@ class StreamWindow(QtWidgets.QMainWindow):
         self.label = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
         self.label.setText("Initialisation du flux...")
         self._gl_view = GLFrameView()
+        self._overlay = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
+        self._overlay.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, True)
+        self._overlay.setAttribute(QtCore.Qt.WA_TranslucentBackground, True)
+        self._overlay.setStyleSheet("background: transparent;")
+        self._overlay.setText("")
+        self._gpu_container = QtWidgets.QWidget()
+        gpu_layout = QtWidgets.QGridLayout()
+        gpu_layout.setContentsMargins(0, 0, 0, 0)
+        gpu_layout.addWidget(self._gl_view, 0, 0)
+        gpu_layout.addWidget(self._overlay, 0, 0)
+        self._gpu_container.setLayout(gpu_layout)
         self._stack = QtWidgets.QStackedWidget()
         self._stack.addWidget(self.label)
-        self._stack.addWidget(self._gl_view)
+        self._stack.addWidget(self._gpu_container)
         self._stack.setCurrentWidget(self.label)
         self.setCentralWidget(self._stack)
 
@@ -65,14 +79,52 @@ class StreamWindow(QtWidgets.QMainWindow):
         self._dxcam_region = None
         self._wgc = WGCCapture(hwnd) if WGC_AVAILABLE else None
         self._wgc_started = False
+        self._auto_foreground_fallback = True
+        self._fallback_last_log = 0.0
         self._crop_left = 0
         self._crop_top = 0
         self._crop_right = 0
         self._crop_bottom = 0
+        self._blob_params = {
+            "enabled": False,
+            "threshold": 25,
+            "min_area": 600,
+            "max_area": 0,
+            "min_w": 10,
+            "min_h": 10,
+            "blur": 5,
+            "dilate": 2,
+            "erode": 0,
+            "scale": 50,
+            "max_blobs": 10,
+            "skip": 0,
+            "max_fps": 15,
+            "alpha": 0.0,
+            "show_boxes": True,
+            "show_centers": False,
+            "show_mask": False,
+            "line": 2,
+            "color": (0, 255, 0),
+        }
+        self._blob_prev = None
+        self._blob_bg = None
+        self._blob_skip_count = 0
+        self._blob_last_boxes = []
+        self._blob_last_mask = None
+        self._blob_last_submit = 0.0
+        self._blob_result_id = 0
+        self._blob_overlay_pixmap = None
+        self._blob_overlay_params = None
+        self._blob_executor = ThreadPoolExecutor(max_workers=1)
+        self._blob_future = None
+        self._blob_pending = None
+        self._blob_lock = threading.Lock()
+        self._blob_reset = False
 
         self._target_fps = 30
         self._frame_count = 0
         self._fps_last = time.perf_counter()
+        self._log = get_logger()
 
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self.update_frame)
@@ -84,6 +136,7 @@ class StreamWindow(QtWidgets.QMainWindow):
         self.timer.stop()
         self._stop_dxcam()
         self._stop_wgc()
+        self._blob_executor.shutdown(wait=False, cancel_futures=True)
         return super().closeEvent(event)
 
     def set_effects(self, brightness: float, contrast: float) -> None:
@@ -114,9 +167,10 @@ class StreamWindow(QtWidgets.QMainWindow):
             return
         self._use_gpu = bool(enabled)
         if self._use_gpu:
-            self._stack.setCurrentWidget(self._gl_view)
+            self._stack.setCurrentWidget(self._gpu_container)
         else:
             self._stack.setCurrentWidget(self.label)
+        self._clear_blob_overlay()
 
     def set_capture_client_area(self, enabled: bool) -> None:
         self._capture_client = bool(enabled)
@@ -128,6 +182,23 @@ class StreamWindow(QtWidgets.QMainWindow):
                 self._restart_dxcam()
             else:
                 self._stop_dxcam()
+
+    def set_blob_params(self, params: dict) -> None:
+        self._blob_params.update(params)
+        self._blob_reset = True
+        self._blob_last_submit = 0.0
+        self._blob_overlay_pixmap = None
+        if not self._blob_params.get("enabled"):
+            self._blob_prev = None
+            self._blob_bg = None
+            self._blob_last_boxes = []
+            self._blob_last_mask = None
+            self._blob_skip_count = 0
+            if self._blob_future and not self._blob_future.done():
+                self._blob_future.cancel()
+            self._blob_future = None
+            self._blob_pending = None
+            self._clear_blob_overlay()
 
     def set_crop(self, left: int, top: int, right: int, bottom: int) -> None:
         self._crop_left = max(0, int(left))
@@ -196,35 +267,84 @@ class StreamWindow(QtWidgets.QMainWindow):
             if frame is None:
                 return
 
-            if self._use_gpu:
+            blob_enabled = self._blob_params.get("enabled")
+            if blob_enabled:
+                self._schedule_blob(frame, f_width, f_height)
+
+            use_gpu = self._use_gpu and self._gpu_available
+            if use_gpu:
                 data, out_w, out_h = self._frame_to_gpu_bytes(frame, f_width, f_height)
                 if data is None:
                     return
                 self._present_gpu_frame(data, out_w, out_h)
+                if blob_enabled:
+                    self._update_gpu_overlay(f_width, f_height)
+                else:
+                    self._clear_blob_overlay()
             else:
                 pixmap = self._frame_to_pixmap(frame, f_width, f_height)
                 if pixmap is None:
                     return
+                pixmap = self._apply_blob_overlay(pixmap, f_width, f_height)
                 self._present_pixmap(pixmap)
+                self._clear_blob_overlay()
             self._tick_fps()
         except Exception as exc:  # pragma: no cover - UI feedback only
+            self._log.exception("update_frame failed")
             self.label.setText(f"Erreur de capture: {exc}")
 
     def _init_capture_backend(self) -> None:
         if self._capture_backend == "dxcam" and DXCAM_AVAILABLE:
-            if self._dxcam is None:
-                self._dxcam = dxcam.create(output_color="BGRA")
+            self._ensure_dxcam_instance()
         else:
             self._dxcam = None
 
+    def _ensure_dxcam_instance(self) -> None:
+        if self._dxcam is None and DXCAM_AVAILABLE:
+            try:
+                self._dxcam = dxcam.create(output_color="BGRA")
+            except Exception:
+                self._dxcam = None
+
+    def _log_foreground_fallback(self, backend: str) -> None:
+        now = time.perf_counter()
+        if now - self._fallback_last_log >= 5.0:
+            self._log.info("Foreground fallback: %s", backend)
+            self._fallback_last_log = now
+
     def _grab_frame(self, left: int, top: int, right: int, bottom: int, width: int, height: int):
+        if (
+            self._capture_backend == "mss"
+            and self._auto_foreground_fallback
+            and win32gui.GetForegroundWindow() == self.hwnd
+        ):
+            region = (left, top, right, bottom)
+            if DXCAM_AVAILABLE:
+                self._ensure_dxcam_instance()
+                if self._dxcam is not None:
+                    if self._dxcam_async:
+                        self._ensure_dxcam_started(region)
+                        frame = self._dxcam.get_latest_frame()
+                    else:
+                        frame = self._dxcam.grab(region=region)
+                    if frame is not None:
+                        self._log_foreground_fallback("DXCAM")
+                        return frame, frame.shape[1], frame.shape[0]
+            if WGC_AVAILABLE:
+                self._ensure_wgc_started()
+                frame = self._wgc.get_latest() if self._wgc else None
+                data, w, h = self._coerce_wgc_frame(frame, left, top, right, bottom)
+                if data is not None:
+                    self._log_foreground_fallback("WGC")
+                    return data, w, h
+
         if self._capture_backend == "wgc" and WGC_AVAILABLE:
             self._ensure_wgc_started()
             frame = self._wgc.get_latest() if self._wgc else None
             return self._coerce_wgc_frame(frame, left, top, right, bottom)
         if self._capture_backend == "dxcam" and DXCAM_AVAILABLE:
             if self._dxcam is None:
-                self._init_capture_backend()
+                self._ensure_dxcam_instance()
             region = (left, top, right, bottom)
             if self._dxcam_async:
                 self._ensure_dxcam_started(region)
@@ -607,6 +727,378 @@ class StreamWindow(QtWidgets.QMainWindow):
 
     def _present_gpu_frame(self, data: bytes, width: int, height: int) -> None:
         self._gl_view.set_frame(data, width, height)
+
+    def _apply_blob_overlay(self, pixmap: QtGui.QPixmap, width: int, height: int) -> QtGui.QPixmap:
+        if not self._blob_params.get("enabled"):
+            return pixmap
+        boxes = self._blob_last_boxes
+        mask = self._blob_last_mask
+        if not boxes and not (self._blob_params.get("show_mask") and mask is not None):
+            return pixmap
+
+        out = QtGui.QPixmap(pixmap)
+        painter = QtGui.QPainter(out)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        scale_x = out.width() / width if width > 0 else 1.0
+        scale_y = out.height() / height if height > 0 else 1.0
+
+        if self._blob_params.get("show_mask") and mask is not None:
+            mask_img = self._mask_to_image(mask, out.width(), out.height())
+            if mask_img is not None:
+                painter.setOpacity(0.35)
+                painter.drawImage(0, 0, mask_img)
+                painter.setOpacity(1.0)
+
+        if self._blob_params.get("show_boxes"):
+            color = self._blob_params.get("color", (0, 255, 0))
+            pen = QtGui.QPen(QtGui.QColor(*color))
+            pen.setWidth(self._blob_params.get("line", 2))
+            painter.setPen(pen)
+            for x, y, w, h in boxes:
+                rx = int(x * scale_x)
+                ry = int(y * scale_y)
+                rw = max(1, int(w * scale_x))
+                rh = max(1, int(h * scale_y))
+                painter.drawRect(rx, ry, rw, rh)
+
+        if self._blob_params.get("show_centers"):
+            color = self._blob_params.get("color", (0, 255, 0))
+            pen = QtGui.QPen(QtGui.QColor(*color))
+            pen.setWidth(1)
+            painter.setPen(pen)
+            for x, y, w, h in boxes:
+                cx = int((x + w * 0.5) * scale_x)
+                cy = int((y + h * 0.5) * scale_y)
+                painter.drawLine(cx - 6, cy, cx + 6, cy)
+                painter.drawLine(cx, cy - 6, cx, cy + 6)
+
+        painter.end()
+        return out
+
+    def _update_gpu_overlay(self, frame_w: int, frame_h: int) -> None:
+        if not self._blob_params.get("enabled"):
+            self._clear_blob_overlay()
+            return
+        boxes = self._blob_last_boxes
+        mask = self._blob_last_mask
+        show_mask = self._blob_params.get("show_mask")
+        if not boxes and not (show_mask and mask is not None):
+            self._clear_blob_overlay()
+            return
+
+        view_w = self._gl_view.width()
+        view_h = self._gl_view.height()
+        if view_w <= 0 or view_h <= 0:
+            return
+
+        params = (
+            self._blob_result_id,
+            view_w,
+            view_h,
+            frame_w,
+            frame_h,
+            show_mask,
+            self._blob_params.get("show_boxes"),
+            self._blob_params.get("show_centers"),
+            self._blob_params.get("line", 2),
+            self._blob_params.get("color", (0, 255, 0)),
+        )
+        if self._blob_overlay_params == params and self._blob_overlay_pixmap is not None:
+            if self._overlay.pixmap() is not self._blob_overlay_pixmap:
+                self._overlay.setPixmap(self._blob_overlay_pixmap)
+            return
+
+        off_x, off_y, disp_w, disp_h = self._fit_viewport(frame_w, frame_h, view_w, view_h)
+        if disp_w <= 0 or disp_h <= 0:
+            return
+
+        overlay = QtGui.QPixmap(view_w, view_h)
+        overlay.fill(QtCore.Qt.transparent)
+        painter = QtGui.QPainter(overlay)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+
+        if show_mask and mask is not None:
+            mask_img = self._mask_to_image(mask, disp_w, disp_h)
+            if mask_img is not None:
+                painter.setOpacity(0.35)
+                painter.drawImage(off_x, off_y, mask_img)
+                painter.setOpacity(1.0)
+
+        if boxes:
+            scale_x = disp_w / frame_w if frame_w > 0 else 1.0
+            scale_y = disp_h / frame_h if frame_h > 0 else 1.0
+
+            if self._blob_params.get("show_boxes"):
+                color = self._blob_params.get("color", (0, 255, 0))
+                pen = QtGui.QPen(QtGui.QColor(*color))
+                pen.setWidth(self._blob_params.get("line", 2))
+                painter.setPen(pen)
+                for x, y, w, h in boxes:
+                    rx = int(x * scale_x) + off_x
+                    ry = int(y * scale_y) + off_y
+                    rw = max(1, int(w * scale_x))
+                    rh = max(1, int(h * scale_y))
+                    painter.drawRect(rx, ry, rw, rh)
+
+            if self._blob_params.get("show_centers"):
+                color = self._blob_params.get("color", (0, 255, 0))
+                pen = QtGui.QPen(QtGui.QColor(*color))
+                pen.setWidth(1)
+                painter.setPen(pen)
+                for x, y, w, h in boxes:
+                    cx = int((x + w * 0.5) * scale_x) + off_x
+                    cy = int((y + h * 0.5) * scale_y) + off_y
+                    painter.drawLine(cx - 6, cy, cx + 6, cy)
+                    painter.drawLine(cx, cy - 6, cx, cy + 6)
+
+        painter.end()
+        self._blob_overlay_pixmap = overlay
+        self._blob_overlay_params = params
+        self._overlay.setPixmap(overlay)
+
+    def _fit_viewport(self, frame_w: int, frame_h: int, view_w: int, view_h: int):
+        if frame_w <= 0 or frame_h <= 0 or view_w <= 0 or view_h <= 0:
+            return 0, 0, view_w, view_h
+        aspect_frame = frame_w / frame_h
+        aspect_view = view_w / view_h
+        if aspect_view > aspect_frame:
+            disp_h = view_h
+            disp_w = int(disp_h * aspect_frame)
+        else:
+            disp_w = view_w
+            disp_h = int(disp_w / aspect_frame)
+        off_x = (view_w - disp_w) // 2
+        off_y = (view_h - disp_h) // 2
+        return off_x, off_y, disp_w, disp_h
+
+    def _clear_blob_overlay(self) -> None:
+        self._overlay.clear()
+        self._blob_overlay_pixmap = None
+        self._blob_overlay_params = None
+
+    def _mask_to_image(self, mask, out_w: int, out_h: int) -> Optional[QtGui.QImage]:
+        if np is None:
+            return None
+        if mask.ndim != 2:
+            return None
+        h, w = mask.shape
+        if h <= 0 or w <= 0:
+            return None
+        qimg = QtGui.QImage(mask.data, w, h, QtGui.QImage.Format_Grayscale8).copy()
+        if w != out_w or h != out_h:
+            qimg = qimg.scaled(out_w, out_h, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.FastTransformation)
+        return qimg
+
+    def _schedule_blob(self, frame, width: int, height: int) -> None:
+        if not self._blob_params.get("enabled"):
+            return
+        self._poll_blob_future()
+        max_fps = float(self._blob_params.get("max_fps", 0) or 0)
+        if max_fps > 0:
+            now = time.perf_counter()
+            if now - self._blob_last_submit < 1.0 / max_fps:
+                return
+        if self._blob_future and not self._blob_future.done():
+            self._blob_pending = (frame, width, height)
+            return
+        frame_copy = self._copy_frame_for_blob(frame, width, height)
+        if frame_copy is None:
+            return
+        params = dict(self._blob_params)
+        state = self._get_blob_state()
+        self._blob_future = self._blob_executor.submit(
+            self._compute_blob_boxes_worker,
+            frame_copy,
+            width,
+            height,
+            params,
+            state,
+        )
+        self._blob_last_submit = time.perf_counter()
+
+    def _poll_blob_future(self) -> None:
+        if not self._blob_future or not self._blob_future.done():
+            return
+        try:
+            boxes, mask, prev, bg, skip_count = self._blob_future.result()
+            with self._blob_lock:
+                self._blob_prev = prev
+                self._blob_bg = bg
+                self._blob_skip_count = skip_count
+            if boxes is not None:
+                self._blob_last_boxes = boxes
+            if mask is not None:
+                self._blob_last_mask = mask
+            self._blob_result_id += 1
+        except Exception:
+            self._log.exception("blob compute failed")
+        finally:
+            self._blob_future = None
+            if self._blob_pending:
+                pending = self._blob_pending
+                self._blob_pending = None
+                self._schedule_blob(*pending)
+
+    def _get_blob_state(self):
+        with self._blob_lock:
+            if self._blob_reset:
+                self._blob_prev = None
+                self._blob_bg = None
+                self._blob_skip_count = 0
+                self._blob_reset = False
+            return self._blob_prev, self._blob_bg, self._blob_skip_count
+
+    def _copy_frame_for_blob(self, frame, width: int, height: int):
+        if np is None:
+            return None
+        arr = self._frame_to_bgra_array(frame, width, height)
+        if arr is None:
+            return None
+        return np.ascontiguousarray(arr)
+
+    def _compute_blob_boxes_worker(self, arr, width: int, height: int, params: dict, state):
+        prev, bg, skip_count = state
+        boxes, mask, prev, bg, skip_count = self._compute_blob_boxes_data(
+            arr,
+            width,
+            height,
+            params,
+            prev,
+            bg,
+            skip_count,
+        )
+        return boxes, mask, prev, bg, skip_count
+
+    def _compute_blob_boxes_data(
+        self,
+        arr,
+        width: int,
+        height: int,
+        params: dict,
+        prev,
+        bg,
+        skip_count: int,
+    ):
+        start = time.perf_counter()
+        if not params.get("enabled"):
+            return None, None, prev, bg, skip_count
+
+        skip = int(params.get("skip", 0))
+        if skip > 0:
+            if skip_count < skip:
+                skip_count += 1
+                return None, None, prev, bg, skip_count
+            skip_count = 0
+
+        scale = max(0.1, params.get("scale", 50) / 100.0)
+        if scale < 1.0 and cv2 is not None:
+            new_w = max(1, int(width * scale))
+            new_h = max(1, int(height * scale))
+            arr = cv2.resize(arr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        elif scale < 1.0 and np is not None:
+            new_w = max(1, int(width * scale))
+            new_h = max(1, int(height * scale))
+            y_idx = (np.linspace(0, arr.shape[0] - 1, new_h)).astype(np.int32)
+            x_idx = (np.linspace(0, arr.shape[1] - 1, new_w)).astype(np.int32)
+            arr = arr[y_idx[:, None], x_idx]
+
+        gray = None
+        if cv2 is not None:
+            gray = cv2.cvtColor(arr, cv2.COLOR_BGRA2GRAY) if arr.shape[2] == 4 else cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        elif np is not None:
+            if arr.shape[2] >= 3:
+                gray = (0.114 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.299 * arr[:, :, 2]).astype(np.uint8)
+        if gray is None:
+            return None, None, prev, bg, skip_count
+
+        alpha = float(params.get("alpha", 0.0))
+        if alpha > 0.0:
+            if bg is None or bg.shape != gray.shape:
+                bg = gray.astype(np.float32)
+            else:
+                bg = (1.0 - alpha) * bg + alpha * gray
+            diff = cv2.absdiff(gray, bg.astype(np.uint8)) if cv2 is not None else np.abs(gray.astype(np.int16) - bg.astype(np.int16)).astype(np.uint8)
+        else:
+            if prev is None or prev.shape != gray.shape:
+                prev = gray
+                return None, None, prev, bg, skip_count
+            diff = cv2.absdiff(gray, prev) if cv2 is not None else np.abs(gray.astype(np.int16) - prev.astype(np.int16)).astype(np.uint8)
+            prev = gray
+
+        blur = int(params.get("blur", 0))
+        if blur > 0 and cv2 is not None:
+            if blur % 2 == 0:
+                blur += 1
+            diff = cv2.GaussianBlur(diff, (blur, blur), 0)
+
+        thresh = int(params.get("threshold", 25))
+        if cv2 is not None:
+            _, mask = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
+        else:
+            mask = (diff > thresh).astype(np.uint8) * 255
+
+        erode = int(params.get("erode", 0))
+        dilate = int(params.get("dilate", 0))
+        if cv2 is not None and (erode > 0 or dilate > 0):
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            if erode > 0:
+                mask = cv2.erode(mask, kernel, iterations=erode)
+            if dilate > 0:
+                mask = cv2.dilate(mask, kernel, iterations=dilate)
+
+        boxes = []
+        if cv2 is not None:
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < params.get("min_area", 0):
+                    continue
+                max_area = params.get("max_area", 0)
+                if max_area > 0 and area > max_area:
+                    continue
+                x, y, w, h = cv2.boundingRect(cnt)
+                if w < params.get("min_w", 0) or h < params.get("min_h", 0):
+                    continue
+                boxes.append((x, y, w, h, area))
+        else:
+            ys, xs = np.where(mask > 0)
+            if xs.size > 0:
+                x0, x1 = xs.min(), xs.max()
+                y0, y1 = ys.min(), ys.max()
+                w = x1 - x0 + 1
+                h = y1 - y0 + 1
+                area = w * h
+                boxes.append((x0, y0, w, h, area))
+
+        boxes.sort(key=lambda b: b[4], reverse=True)
+        max_blobs = int(params.get("max_blobs", 10))
+        boxes = boxes[:max_blobs]
+
+        if scale < 1.0:
+            inv = 1.0 / scale
+            boxes = [(int(x * inv), int(y * inv), int(w * inv), int(h * inv)) for x, y, w, h, _ in boxes]
+        else:
+            boxes = [(x, y, w, h) for x, y, w, h, _ in boxes]
+
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        if elapsed_ms > 80:
+            self._log.warning("blob slow: %.1f ms", elapsed_ms)
+        return boxes, mask, prev, bg, skip_count
+
+    def _frame_to_bgra_array(self, frame, width: int, height: int):
+        if np is None:
+            return None
+        if isinstance(frame, mss.base.ScreenShot):
+            arr = np.frombuffer(frame.bgra, dtype=np.uint8).reshape(height, width, 4)
+            return arr
+        if isinstance(frame, (bytes, bytearray, memoryview)):
+            arr = np.frombuffer(frame, dtype=np.uint8)
+            if arr.size == width * height * 4:
+                return arr.reshape(height, width, 4)
+            return None
+        if isinstance(frame, np.ndarray):
+            return frame
+        return None
 
     def _tick_fps(self) -> None:
         self._frame_count += 1
