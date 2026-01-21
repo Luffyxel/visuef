@@ -1,5 +1,7 @@
 from PyQt5 import QtCore, QtWidgets
 
+from config_store import load_configs, save_configs
+
 
 class EffectsWindow(QtWidgets.QWidget):
     effects_changed = QtCore.pyqtSignal(float, float)  # brightness, contrast
@@ -26,6 +28,15 @@ class EffectsWindow(QtWidgets.QWidget):
         self.setWindowTitle("Reglages (luminosite / contraste)")
         self.setMinimumWidth(380)
 
+        self._configs = load_configs()
+        self._loading_profile = False
+
+        self.profile_combo = QtWidgets.QComboBox()
+        self.profile_name = QtWidgets.QLineEdit()
+        self.profile_name.setPlaceholderText("Nom du profil")
+        self.profile_save_btn = QtWidgets.QPushButton("Sauvegarder")
+        self.profile_delete_btn = QtWidgets.QPushButton("Supprimer")
+
         self.brightness_slider = self._make_slider(50, 200, 100)
         self.contrast_slider = self._make_slider(50, 200, 100)
         self.fps_slider = self._make_slider(5, 120, 30)
@@ -46,6 +57,8 @@ class EffectsWindow(QtWidgets.QWidget):
         self.blob_max_area = self._make_spinbox(0, 2000000, 0)
         self.blob_min_w = self._make_spinbox(0, 10000, 10)
         self.blob_min_h = self._make_spinbox(0, 10000, 10)
+        self.blob_max_w = self._make_spinbox(0, 20000, 0)
+        self.blob_max_h = self._make_spinbox(0, 20000, 0)
         self.blob_blur = self._make_spinbox(0, 31, 5)
         self.blob_dilate = self._make_spinbox(0, 10, 2)
         self.blob_erode = self._make_spinbox(0, 10, 0)
@@ -109,6 +122,8 @@ class EffectsWindow(QtWidgets.QWidget):
         effects_form.addRow("Backend effets", self.effects_combo)
         effects_form.addRow(self._build_blob_group())
 
+        profile_widget = self._build_profile_widget()
+
         rec_widget = QtWidgets.QWidget()
         rec_widget.setLayout(rec_form)
         effects_widget = QtWidgets.QWidget()
@@ -120,6 +135,7 @@ class EffectsWindow(QtWidgets.QWidget):
 
         main_layout = QtWidgets.QVBoxLayout()
         main_layout.addLayout(top_bar)
+        main_layout.addWidget(profile_widget)
         main_layout.addWidget(self._make_section("Rec", rec_widget))
         main_layout.addWidget(self._make_section("Effets", effects_widget))
         self.setLayout(main_layout)
@@ -140,12 +156,17 @@ class EffectsWindow(QtWidgets.QWidget):
         self.crop_bottom.valueChanged.connect(self._emit_crop)
         self.backend_combo.currentIndexChanged.connect(self._emit_backend)
         self.effects_combo.currentIndexChanged.connect(self._emit_effects_backend)
+        self.profile_combo.currentIndexChanged.connect(self._apply_selected_profile)
+        self.profile_save_btn.clicked.connect(self._save_profile)
+        self.profile_delete_btn.clicked.connect(self._delete_profile)
         self.blob_group.toggled.connect(self._emit_blob)
         self.blob_threshold.valueChanged.connect(self._emit_blob)
         self.blob_min_area.valueChanged.connect(self._emit_blob)
         self.blob_max_area.valueChanged.connect(self._emit_blob)
         self.blob_min_w.valueChanged.connect(self._emit_blob)
         self.blob_min_h.valueChanged.connect(self._emit_blob)
+        self.blob_max_w.valueChanged.connect(self._emit_blob)
+        self.blob_max_h.valueChanged.connect(self._emit_blob)
         self.blob_blur.valueChanged.connect(self._emit_blob)
         self.blob_dilate.valueChanged.connect(self._emit_blob)
         self.blob_erode.valueChanged.connect(self._emit_blob)
@@ -174,6 +195,21 @@ class EffectsWindow(QtWidgets.QWidget):
         self._emit_blob()
         self._emit_backend()
         self._emit_effects_backend()
+
+    def _build_profile_widget(self) -> QtWidgets.QWidget:
+        grid = QtWidgets.QGridLayout()
+        grid.addWidget(QtWidgets.QLabel("Profil"), 0, 0)
+        grid.addWidget(self.profile_combo, 0, 1, 1, 2)
+        grid.addWidget(self.profile_delete_btn, 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Nom"), 1, 0)
+        grid.addWidget(self.profile_name, 1, 1, 1, 2)
+        grid.addWidget(self.profile_save_btn, 1, 3)
+        grid.setContentsMargins(0, 0, 0, 0)
+
+        container = QtWidgets.QWidget()
+        container.setLayout(grid)
+        self._refresh_profiles()
+        return container
 
     def _make_slider(self, minv: int, maxv: int, val: int) -> QtWidgets.QSlider:
         slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -220,25 +256,32 @@ class EffectsWindow(QtWidgets.QWidget):
         min_size_widget = QtWidgets.QWidget()
         min_size_widget.setLayout(min_size)
         grid.addWidget(min_size_widget, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("Flou"), 2, 0)
-        grid.addWidget(self.blob_blur, 2, 1)
-        grid.addWidget(QtWidgets.QLabel("Dilate/Erode"), 2, 2)
+        grid.addWidget(QtWidgets.QLabel("Max L/H"), 2, 0)
+        max_size = QtWidgets.QHBoxLayout()
+        max_size.addWidget(self.blob_max_w)
+        max_size.addWidget(self.blob_max_h)
+        max_size_widget = QtWidgets.QWidget()
+        max_size_widget.setLayout(max_size)
+        grid.addWidget(max_size_widget, 2, 1)
+        grid.addWidget(QtWidgets.QLabel("Flou"), 2, 2)
+        grid.addWidget(self.blob_blur, 2, 3)
+        grid.addWidget(QtWidgets.QLabel("Dilate/Erode"), 3, 0)
         morph = QtWidgets.QHBoxLayout()
         morph.addWidget(self.blob_dilate)
         morph.addWidget(self.blob_erode)
         morph_widget = QtWidgets.QWidget()
         morph_widget.setLayout(morph)
-        grid.addWidget(morph_widget, 2, 3)
-        grid.addWidget(QtWidgets.QLabel("Echelle %"), 3, 0)
-        grid.addWidget(self.blob_scale, 3, 1)
-        grid.addWidget(QtWidgets.QLabel("Max blobs"), 3, 2)
-        grid.addWidget(self.blob_max_blobs, 3, 3)
-        grid.addWidget(QtWidgets.QLabel("Skip frames"), 4, 0)
-        grid.addWidget(self.blob_skip, 4, 1)
-        grid.addWidget(QtWidgets.QLabel("Lissage %"), 4, 2)
-        grid.addWidget(self.blob_alpha, 4, 3)
-        grid.addWidget(QtWidgets.QLabel("FPS blob"), 5, 0)
-        grid.addWidget(self.blob_fps, 5, 1)
+        grid.addWidget(morph_widget, 3, 1)
+        grid.addWidget(QtWidgets.QLabel("Echelle %"), 3, 2)
+        grid.addWidget(self.blob_scale, 3, 3)
+        grid.addWidget(QtWidgets.QLabel("Max blobs"), 4, 0)
+        grid.addWidget(self.blob_max_blobs, 4, 1)
+        grid.addWidget(QtWidgets.QLabel("Skip frames"), 4, 2)
+        grid.addWidget(self.blob_skip, 4, 3)
+        grid.addWidget(QtWidgets.QLabel("Lissage %"), 5, 0)
+        grid.addWidget(self.blob_alpha, 5, 1)
+        grid.addWidget(QtWidgets.QLabel("FPS blob"), 5, 2)
+        grid.addWidget(self.blob_fps, 5, 3)
         grid.addWidget(self.blob_show_boxes, 6, 0)
         grid.addWidget(self.blob_show_centers, 6, 1)
         grid.addWidget(self.blob_show_mask, 6, 2)
@@ -279,6 +322,47 @@ class EffectsWindow(QtWidgets.QWidget):
         container = QtWidgets.QWidget()
         container.setLayout(layout)
         return container
+
+    def _refresh_profiles(self, select_name: str = None) -> None:
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        self.profile_combo.addItem("(aucun)", None)
+        for name in sorted(self._configs.keys()):
+            self.profile_combo.addItem(name, name)
+        if select_name:
+            idx = self.profile_combo.findData(select_name)
+            if idx >= 0:
+                self.profile_combo.setCurrentIndex(idx)
+        self.profile_combo.blockSignals(False)
+
+    def _set_combo_data(self, combo: QtWidgets.QComboBox, value: str) -> None:
+        if value is None:
+            return
+        idx = combo.findData(value)
+        if idx >= 0:
+            old = combo.blockSignals(True)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(old)
+
+    def _set_spin_value(self, widget: QtWidgets.QSpinBox, value: int) -> None:
+        old = widget.blockSignals(True)
+        widget.setValue(int(value))
+        widget.blockSignals(old)
+
+    def _set_slider_value(self, widget: QtWidgets.QSlider, value: int) -> None:
+        old = widget.blockSignals(True)
+        widget.setValue(int(value))
+        widget.blockSignals(old)
+
+    def _set_checked(self, widget: QtWidgets.QCheckBox, value: bool) -> None:
+        old = widget.blockSignals(True)
+        widget.setChecked(bool(value))
+        widget.blockSignals(old)
+
+    def _set_group_checked(self, widget: QtWidgets.QGroupBox, value: bool) -> None:
+        old = widget.blockSignals(True)
+        widget.setChecked(bool(value))
+        widget.blockSignals(old)
 
     def _set_combo_by_data(self, combo: QtWidgets.QComboBox, value: str) -> None:
         idx = combo.findData(value)
@@ -333,6 +417,137 @@ class EffectsWindow(QtWidgets.QWidget):
         self.blob_show_centers.setChecked(False)
         self.blob_show_mask.setChecked(False)
         self.blob_fps.setValue(15)
+        self.blob_max_w.setValue(0)
+        self.blob_max_h.setValue(0)
+
+    def _collect_settings(self) -> dict:
+        return {
+            "capture_backend": self.backend_combo.currentData(),
+            "effects_backend": self.effects_combo.currentData(),
+            "brightness": self.brightness_slider.value() / 100.0,
+            "contrast": self.contrast_slider.value() / 100.0,
+            "fps": self.fps_slider.value(),
+            "scale": self.scale_slider.value(),
+            "performance": self.fast_checkbox.isChecked(),
+            "gpu": self.gpu_checkbox.isChecked(),
+            "client_area": self.client_checkbox.isChecked(),
+            "dxcam_async": self.dxcam_async_checkbox.isChecked(),
+            "crop": {
+                "left": self.crop_left.value(),
+                "top": self.crop_top.value(),
+                "right": self.crop_right.value(),
+                "bottom": self.crop_bottom.value(),
+            },
+            "blob": {
+                "enabled": self.blob_group.isChecked(),
+                "threshold": self.blob_threshold.value(),
+                "min_area": self.blob_min_area.value(),
+                "max_area": self.blob_max_area.value(),
+                "min_w": self.blob_min_w.value(),
+                "min_h": self.blob_min_h.value(),
+                "max_w": self.blob_max_w.value(),
+                "max_h": self.blob_max_h.value(),
+                "blur": self.blob_blur.value(),
+                "dilate": self.blob_dilate.value(),
+                "erode": self.blob_erode.value(),
+                "scale": self.blob_scale.value(),
+                "max_blobs": self.blob_max_blobs.value(),
+                "skip": self.blob_skip.value(),
+                "max_fps": self.blob_fps.value(),
+                "alpha": self.blob_alpha.value() / 100.0,
+                "show_boxes": self.blob_show_boxes.isChecked(),
+                "show_centers": self.blob_show_centers.isChecked(),
+                "show_mask": self.blob_show_mask.isChecked(),
+                "line": self.blob_line.value(),
+                "color": [self.blob_r.value(), self.blob_g.value(), self.blob_b.value()],
+            },
+        }
+
+    def _apply_settings(self, settings: dict) -> None:
+        if not isinstance(settings, dict):
+            return
+
+        self._set_combo_data(self.backend_combo, settings.get("capture_backend"))
+        self._set_combo_data(self.effects_combo, settings.get("effects_backend"))
+
+        self._set_slider_value(self.brightness_slider, int(round(settings.get("brightness", 1.0) * 100)))
+        self._set_slider_value(self.contrast_slider, int(round(settings.get("contrast", 1.0) * 100)))
+        self._set_slider_value(self.fps_slider, int(settings.get("fps", self.fps_slider.value())))
+        self._set_slider_value(self.scale_slider, int(settings.get("scale", self.scale_slider.value())))
+
+        self._set_checked(self.fast_checkbox, settings.get("performance", self.fast_checkbox.isChecked()))
+        self._set_checked(self.gpu_checkbox, settings.get("gpu", self.gpu_checkbox.isChecked()))
+        self._set_checked(self.client_checkbox, settings.get("client_area", self.client_checkbox.isChecked()))
+        self._set_checked(self.dxcam_async_checkbox, settings.get("dxcam_async", self.dxcam_async_checkbox.isChecked()))
+
+        crop = settings.get("crop", {})
+        if isinstance(crop, dict):
+            self._set_spin_value(self.crop_left, int(crop.get("left", self.crop_left.value())))
+            self._set_spin_value(self.crop_top, int(crop.get("top", self.crop_top.value())))
+            self._set_spin_value(self.crop_right, int(crop.get("right", self.crop_right.value())))
+            self._set_spin_value(self.crop_bottom, int(crop.get("bottom", self.crop_bottom.value())))
+
+        blob = settings.get("blob", {})
+        if isinstance(blob, dict):
+            self._set_group_checked(self.blob_group, blob.get("enabled", self.blob_group.isChecked()))
+            self._set_spin_value(self.blob_threshold, int(blob.get("threshold", self.blob_threshold.value())))
+            self._set_spin_value(self.blob_min_area, int(blob.get("min_area", self.blob_min_area.value())))
+            self._set_spin_value(self.blob_max_area, int(blob.get("max_area", self.blob_max_area.value())))
+            self._set_spin_value(self.blob_min_w, int(blob.get("min_w", self.blob_min_w.value())))
+            self._set_spin_value(self.blob_min_h, int(blob.get("min_h", self.blob_min_h.value())))
+            self._set_spin_value(self.blob_max_w, int(blob.get("max_w", self.blob_max_w.value())))
+            self._set_spin_value(self.blob_max_h, int(blob.get("max_h", self.blob_max_h.value())))
+            self._set_spin_value(self.blob_blur, int(blob.get("blur", self.blob_blur.value())))
+            self._set_spin_value(self.blob_dilate, int(blob.get("dilate", self.blob_dilate.value())))
+            self._set_spin_value(self.blob_erode, int(blob.get("erode", self.blob_erode.value())))
+            self._set_spin_value(self.blob_scale, int(blob.get("scale", self.blob_scale.value())))
+            self._set_spin_value(self.blob_max_blobs, int(blob.get("max_blobs", self.blob_max_blobs.value())))
+            self._set_spin_value(self.blob_skip, int(blob.get("skip", self.blob_skip.value())))
+            self._set_spin_value(self.blob_fps, int(blob.get("max_fps", self.blob_fps.value())))
+            self._set_spin_value(self.blob_alpha, int(round(blob.get("alpha", self.blob_alpha.value() / 100.0) * 100)))
+            self._set_checked(self.blob_show_boxes, blob.get("show_boxes", self.blob_show_boxes.isChecked()))
+            self._set_checked(self.blob_show_centers, blob.get("show_centers", self.blob_show_centers.isChecked()))
+            self._set_checked(self.blob_show_mask, blob.get("show_mask", self.blob_show_mask.isChecked()))
+            self._set_spin_value(self.blob_line, int(blob.get("line", self.blob_line.value())))
+            color = blob.get("color", [self.blob_r.value(), self.blob_g.value(), self.blob_b.value()])
+            if isinstance(color, (list, tuple)) and len(color) == 3:
+                self._set_spin_value(self.blob_r, int(color[0]))
+                self._set_spin_value(self.blob_g, int(color[1]))
+                self._set_spin_value(self.blob_b, int(color[2]))
+
+        self.emit_current()
+
+    def _apply_selected_profile(self, _index: int = None) -> None:
+        name = self.profile_combo.currentData()
+        if not name:
+            return
+        settings = self._configs.get(name)
+        if settings is None:
+            return
+        self.profile_name.setText(name)
+        self._apply_settings(settings)
+
+    def _save_profile(self) -> None:
+        name = self.profile_name.text().strip()
+        if not name:
+            name = self.profile_combo.currentData() or ""
+        if not name:
+            QtWidgets.QMessageBox.warning(self, "Erreur", "Nom de profil requis.")
+            return
+        self._configs[name] = self._collect_settings()
+        save_configs(self._configs)
+        self._refresh_profiles(select_name=name)
+        self.profile_name.setText(name)
+
+    def _delete_profile(self) -> None:
+        name = self.profile_combo.currentData()
+        if not name:
+            return
+        if name in self._configs:
+            del self._configs[name]
+            save_configs(self._configs)
+            self._refresh_profiles()
+            self.profile_name.setText("")
 
     def _emit_effects(self) -> None:
         brightness = self.brightness_slider.value() / 100.0
@@ -373,6 +588,8 @@ class EffectsWindow(QtWidgets.QWidget):
             "max_area": self.blob_max_area.value(),
             "min_w": self.blob_min_w.value(),
             "min_h": self.blob_min_h.value(),
+            "max_w": self.blob_max_w.value(),
+            "max_h": self.blob_max_h.value(),
             "blur": self.blob_blur.value(),
             "dilate": self.blob_dilate.value(),
             "erode": self.blob_erode.value(),

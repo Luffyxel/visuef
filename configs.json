@@ -1,0 +1,50 @@
+{
+  "profiles": {
+    "aaaaa": {
+      "blob": {
+        "alpha": 0.0,
+        "blur": 5,
+        "color": [
+          0,
+          255,
+          0
+        ],
+        "dilate": 2,
+        "enabled": true,
+        "erode": 0,
+        "line": 2,
+        "max_area": 0,
+        "max_blobs": 10,
+        "max_fps": 15,
+        "max_h": 0,
+        "max_w": 0,
+        "min_area": 600,
+        "min_h": 10,
+        "min_w": 10,
+        "scale": 50,
+        "show_boxes": true,
+        "show_centers": false,
+        "show_mask": false,
+        "skip": 0,
+        "threshold": 25
+      },
+      "brightness": 1.0,
+      "capture_backend": "wgc",
+      "client_area": true,
+      "contrast": 1.0,
+      "crop": {
+        "bottom": 0,
+        "left": 0,
+        "right": 0,
+        "top": 0
+      },
+      "dxcam_async": true,
+      "effects_backend": "numpy",
+      "fps": 56,
+      "gpu": true,
+      "performance": true,
+      "scale": 100
+    }
+  },
+  "version": 1
+}

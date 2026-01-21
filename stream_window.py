@@ -5,6 +5,7 @@ from typing import Optional
 
 import mss
 from PIL import Image, ImageEnhance
+import win32api
 import win32gui
 from PyQt5 import QtCore, QtGui, QtWidgets
 
@@ -77,6 +78,9 @@ class StreamWindow(QtWidgets.QMainWindow):
         self._dxcam_async = False
         self._dxcam_started = False
         self._dxcam_region = None
+        self._dxcam_output_idx = None
+        self._dxcam_output_rect = None
+        self._dxcam_last_error = 0.0
         self._wgc = WGCCapture(hwnd) if WGC_AVAILABLE else None
         self._wgc_started = False
         self._auto_foreground_fallback = True
@@ -92,6 +96,8 @@ class StreamWindow(QtWidgets.QMainWindow):
             "max_area": 0,
             "min_w": 10,
             "min_h": 10,
+            "max_w": 0,
+            "max_h": 0,
             "blur": 5,
             "dilate": 2,
             "erode": 0,
@@ -300,17 +306,61 @@ class StreamWindow(QtWidgets.QMainWindow):
             self._dxcam = None
 
     def _ensure_dxcam_instance(self) -> None:
-        if self._dxcam is None and DXCAM_AVAILABLE:
+        if not DXCAM_AVAILABLE:
+            self._dxcam = None
+            self._dxcam_output_idx = None
+            self._dxcam_output_rect = None
+            return
+        output_idx, output_rect = self._get_monitor_index()
+        if output_rect is None:
+            output_idx = None
+        if self._dxcam is None or output_idx != self._dxcam_output_idx:
+            self._stop_dxcam()
             try:
-                self._dxcam = dxcam.create(output_color="BGRA")
+                if output_idx is None:
+                    self._dxcam = dxcam.create(output_color="BGRA")
+                else:
+                    self._dxcam = dxcam.create(output_color="BGRA", output_idx=output_idx)
             except Exception:
                 self._dxcam = None
+                self._dxcam_output_idx = None
+                self._dxcam_output_rect = None
+                return
+        self._dxcam_output_idx = output_idx
+        self._dxcam_output_rect = output_rect
 
     def _log_foreground_fallback(self, backend: str) -> None:
         now = time.perf_counter()
         if now - self._fallback_last_log >= 5.0:
             self._log.info("Foreground fallback: %s", backend)
             self._fallback_last_log = now
+
+    def _get_monitor_index(self):
+        rect = win32gui.GetWindowRect(self.hwnd)
+        cx = (rect[0] + rect[2]) // 2
+        cy = (rect[1] + rect[3]) // 2
+        monitors = win32api.EnumDisplayMonitors()
+        for idx, (_, _, mrect) in enumerate(monitors):
+            if mrect[0] <= cx < mrect[2] and mrect[1] <= cy < mrect[3]:
+                return idx, mrect
+        if monitors:
+            return 0, monitors[0][2]
+        return None, None
+
+    def _dxcam_region_from_absolute(self, region):
+        if region is None:
+            return None
+        if self._dxcam_output_rect is None:
+            return region
+        left, top, right, bottom = region
+        mon_left, mon_top, mon_right, mon_bottom = self._dxcam_output_rect
+        left = max(left, mon_left)
+        top = max(top, mon_top)
+        right = min(right, mon_right)
+        bottom = min(bottom, mon_bottom)
+        if right <= left or bottom <= top:
+            return None
+        return (left - mon_left, top - mon_top, right - mon_left, bottom - mon_top)
 
     def _grab_frame(self, left: int, top: int, right: int, bottom: int, width: int, height: int):
         if (
@@ -321,12 +371,18 @@ class StreamWindow(QtWidgets.QMainWindow):
             region = (left, top, right, bottom)
             if DXCAM_AVAILABLE:
                 self._ensure_dxcam_instance()
-                if self._dxcam is not None:
+                region = self._dxcam_region_from_absolute(region)
+                if self._dxcam is not None and region is not None:
                     if self._dxcam_async:
-                        self._ensure_dxcam_started(region)
-                        frame = self._dxcam.get_latest_frame()
+                        if self._ensure_dxcam_started(region):
+                            frame = self._dxcam.get_latest_frame()
+                        else:
+                            frame = None
                     else:
-                        frame = self._dxcam.grab(region=region)
+                        try:
+                            frame = self._dxcam.grab(region=region)
+                        except Exception:
+                            frame = None
                     if frame is not None:
                         self._log_foreground_fallback("DXCAM")
                         return frame, frame.shape[1], frame.shape[0]
@@ -345,12 +401,19 @@ class StreamWindow(QtWidgets.QMainWindow):
         if self._capture_backend == "dxcam" and DXCAM_AVAILABLE:
             if self._dxcam is None:
                 self._ensure_dxcam_instance()
-            region = (left, top, right, bottom)
+            region = self._dxcam_region_from_absolute((left, top, right, bottom))
+            if region is None:
+                return None, 0, 0
             if self._dxcam_async:
-                self._ensure_dxcam_started(region)
-                frame = self._dxcam.get_latest_frame() if self._dxcam else None
+                if self._ensure_dxcam_started(region):
+                    frame = self._dxcam.get_latest_frame() if self._dxcam else None
+                else:
+                    frame = None
             else:
-                frame = self._dxcam.grab(region=region)
+                try:
+                    frame = self._dxcam.grab(region=region)
+                except Exception:
+                    frame = None
             if frame is None:
                 return None, 0, 0
             return frame, frame.shape[1], frame.shape[0]
@@ -372,11 +435,11 @@ class StreamWindow(QtWidgets.QMainWindow):
         self._stop_dxcam()
         # Start lazily on next grab with current region.
 
-    def _ensure_dxcam_started(self, region) -> None:
+    def _ensure_dxcam_started(self, region) -> bool:
         if not self._dxcam:
-            return
+            return False
         if self._dxcam_started and self._dxcam_region == region:
-            return
+            return True
         self._stop_dxcam()
         try:
             self._dxcam.start(target_fps=self._target_fps, region=region)
@@ -385,8 +448,21 @@ class StreamWindow(QtWidgets.QMainWindow):
                 self._dxcam.start(target_fps=self._target_fps)
             except TypeError:
                 self._dxcam.start()
+        except ValueError as exc:
+            now = time.perf_counter()
+            if now - self._dxcam_last_error >= 2.0:
+                self._log.warning("DXCAM region invalid: %s", exc)
+                self._dxcam_last_error = now
+            return False
+        except Exception as exc:
+            now = time.perf_counter()
+            if now - self._dxcam_last_error >= 2.0:
+                self._log.warning("DXCAM start failed: %s", exc)
+                self._dxcam_last_error = now
+            return False
         self._dxcam_started = True
         self._dxcam_region = region
+        return True
 
     def _start_wgc(self) -> None:
         if not self._wgc or self._wgc_started:
@@ -1058,6 +1134,12 @@ class StreamWindow(QtWidgets.QMainWindow):
                     continue
                 x, y, w, h = cv2.boundingRect(cnt)
                 if w < params.get("min_w", 0) or h < params.get("min_h", 0):
+                    continue
+                max_w = params.get("max_w", 0)
+                max_h = params.get("max_h", 0)
+                if max_w > 0 and w > max_w:
+                    continue
+                if max_h > 0 and h > max_h:
                     continue
                 boxes.append((x, y, w, h, area))
         else:
