@@ -19,9 +19,15 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     np = None
 
+try:
+    import cv2
+except ImportError:  # pragma: no cover - optional dependency
+    cv2 = None
+
 
 DXCAM_AVAILABLE = dxcam is not None
 NUMPY_AVAILABLE = np is not None
+OPENCV_AVAILABLE = cv2 is not None
 
 
 class StreamWindow(QtWidgets.QMainWindow):
@@ -59,6 +65,10 @@ class StreamWindow(QtWidgets.QMainWindow):
         self._dxcam_region = None
         self._wgc = WGCCapture(hwnd) if WGC_AVAILABLE else None
         self._wgc_started = False
+        self._crop_left = 0
+        self._crop_top = 0
+        self._crop_right = 0
+        self._crop_bottom = 0
 
         self._target_fps = 30
         self._frame_count = 0
@@ -119,6 +129,12 @@ class StreamWindow(QtWidgets.QMainWindow):
             else:
                 self._stop_dxcam()
 
+    def set_crop(self, left: int, top: int, right: int, bottom: int) -> None:
+        self._crop_left = max(0, int(left))
+        self._crop_top = max(0, int(top))
+        self._crop_right = max(0, int(right))
+        self._crop_bottom = max(0, int(bottom))
+
     def set_capture_backend(self, backend: str) -> None:
         backend = backend.lower()
         if backend == self._capture_backend:
@@ -142,7 +158,9 @@ class StreamWindow(QtWidgets.QMainWindow):
         backend = backend.lower()
         if backend == "numpy" and not NUMPY_AVAILABLE:
             return
-        if backend not in ("numpy", "pillow"):
+        if backend == "opencv" and not OPENCV_AVAILABLE:
+            return
+        if backend not in ("numpy", "opencv", "auto"):
             return
         self._effects_backend = backend
 
@@ -171,7 +189,7 @@ class StreamWindow(QtWidgets.QMainWindow):
             left, top, right, bottom = self._get_capture_rect()
             width, height = right - left, bottom - top
             if width <= 0 or height <= 0:
-                self.label.setText("Fenetre cible minimisee ou hors ecran.")
+                self.label.setText("Rognage invalide ou fenetre hors ecran.")
                 return
 
             frame, f_width, f_height = self._grab_frame(left, top, right, bottom, width, height)
@@ -314,11 +332,17 @@ class StreamWindow(QtWidgets.QMainWindow):
 
     def _get_capture_rect(self):
         if not self._capture_client:
-            return win32gui.GetWindowRect(self.hwnd)
-        left, top, right, bottom = win32gui.GetClientRect(self.hwnd)
-        tl = win32gui.ClientToScreen(self.hwnd, (left, top))
-        br = win32gui.ClientToScreen(self.hwnd, (right, bottom))
-        return tl[0], tl[1], br[0], br[1]
+            left, top, right, bottom = win32gui.GetWindowRect(self.hwnd)
+        else:
+            left, top, right, bottom = win32gui.GetClientRect(self.hwnd)
+            tl = win32gui.ClientToScreen(self.hwnd, (left, top))
+            br = win32gui.ClientToScreen(self.hwnd, (right, bottom))
+            left, top, right, bottom = tl[0], tl[1], br[0], br[1]
+        left += self._crop_left
+        top += self._crop_top
+        right -= self._crop_right
+        bottom -= self._crop_bottom
+        return left, top, right, bottom
 
     def _maybe_crop_client(self, frame, left: int, top: int, right: int, bottom: int):
         if not self._capture_client or np is None:
@@ -345,12 +369,55 @@ class StreamWindow(QtWidgets.QMainWindow):
         out_h = max(1, int(height * scale))
         use_fast = self._fast_mode
 
-        if self._effects_backend == "numpy" and NUMPY_AVAILABLE:
+        if (
+            self._brightness == 1.0
+            and self._contrast == 1.0
+            and out_w == width
+            and out_h == height
+        ):
+            qimage = self._qimage_from_raw(frame, width, height)
+            if qimage is not None:
+                return QtGui.QPixmap.fromImage(qimage)
+
+        if self._effects_backend in ("numpy", "auto") and NUMPY_AVAILABLE:
             pixmap = self._pixmap_from_numpy(frame, width, height, out_w, out_h, use_fast)
             if pixmap is not None:
                 return pixmap
 
+        if self._effects_backend in ("opencv", "auto") and OPENCV_AVAILABLE:
+            pixmap = self._pixmap_from_opencv(frame, width, height, out_w, out_h, use_fast)
+            if pixmap is not None:
+                return pixmap
+
         return self._pixmap_from_pillow(frame, width, height, out_w, out_h, use_fast)
+
+    def _qimage_from_raw(self, frame, width: int, height: int) -> Optional[QtGui.QImage]:
+        if isinstance(frame, mss.base.ScreenShot):
+            return QtGui.QImage(
+                frame.bgra,
+                frame.width,
+                frame.height,
+                QtGui.QImage.Format_ARGB32,
+            ).copy()
+        if np is not None and isinstance(frame, np.ndarray):
+            if frame.ndim != 3:
+                return None
+            height, width = frame.shape[0], frame.shape[1]
+            if frame.shape[2] >= 4:
+                fmt = QtGui.QImage.Format_ARGB32
+            elif frame.shape[2] == 3:
+                fmt = QtGui.QImage.Format_BGR888
+            else:
+                return None
+            return QtGui.QImage(frame.data, width, height, fmt).copy()
+        if isinstance(frame, (bytes, bytearray, memoryview)):
+            return QtGui.QImage(
+                frame,
+                width,
+                height,
+                QtGui.QImage.Format_ARGB32,
+            ).copy()
+        return None
 
     def _pixmap_from_numpy(
         self,
@@ -445,6 +512,62 @@ class StreamWindow(QtWidgets.QMainWindow):
             img.height,
             QtGui.QImage.Format_RGB888,
         ).copy()
+        return QtGui.QPixmap.fromImage(qimage)
+
+    def _pixmap_from_opencv(
+        self,
+        frame,
+        width: int,
+        height: int,
+        out_w: int,
+        out_h: int,
+        use_fast: bool,
+    ) -> Optional[QtGui.QPixmap]:
+        if cv2 is None:
+            return None
+
+        if isinstance(frame, mss.base.ScreenShot):
+            arr = np.frombuffer(frame.bgra, dtype=np.uint8).reshape(height, width, 4)
+        else:
+            if np is None:
+                return None
+            arr = np.asarray(frame)
+            if arr.ndim != 3:
+                return None
+
+        if out_w != width or out_h != height:
+            interp = cv2.INTER_NEAREST if use_fast else cv2.INTER_LINEAR
+            arr = cv2.resize(arr, (out_w, out_h), interpolation=interp)
+            height, width = arr.shape[0], arr.shape[1]
+
+        if arr.shape[2] >= 3:
+            rgb = arr[:, :, :3].astype(np.float32)
+        else:
+            return None
+
+        if self._contrast != 1.0:
+            rgb = (rgb - 128.0) * self._contrast + 128.0
+        if self._brightness != 1.0:
+            rgb = rgb * self._brightness
+        rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+
+        if arr.shape[2] >= 4:
+            alpha = arr[:, :, 3:4]
+            out = np.concatenate((rgb, alpha), axis=2)
+            qimage = QtGui.QImage(
+                out.data,
+                width,
+                height,
+                QtGui.QImage.Format_ARGB32,
+            ).copy()
+        else:
+            qimage = QtGui.QImage(
+                rgb.data,
+                width,
+                height,
+                QtGui.QImage.Format_BGR888,
+            ).copy()
+
         return QtGui.QPixmap.fromImage(qimage)
 
     def _frame_to_gpu_bytes(self, frame, width: int, height: int):

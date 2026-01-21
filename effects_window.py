@@ -9,10 +9,18 @@ class EffectsWindow(QtWidgets.QWidget):
     gpu_changed = QtCore.pyqtSignal(bool)
     client_area_changed = QtCore.pyqtSignal(bool)
     dxcam_async_changed = QtCore.pyqtSignal(bool)
+    crop_changed = QtCore.pyqtSignal(int, int, int, int)
     backend_changed = QtCore.pyqtSignal(str)
     effects_backend_changed = QtCore.pyqtSignal(str)
 
-    def __init__(self, has_dxcam: bool, has_numpy: bool, has_gl: bool, has_wgc: bool):
+    def __init__(
+        self,
+        has_dxcam: bool,
+        has_numpy: bool,
+        has_gl: bool,
+        has_wgc: bool,
+        has_opencv: bool,
+    ):
         super().__init__()
         self.setWindowTitle("Reglages (luminosite / contraste)")
         self.setMinimumWidth(380)
@@ -25,6 +33,10 @@ class EffectsWindow(QtWidgets.QWidget):
         self.gpu_checkbox = QtWidgets.QCheckBox("Rendu GPU (OpenGL)")
         self.client_checkbox = QtWidgets.QCheckBox("Zone client")
         self.dxcam_async_checkbox = QtWidgets.QCheckBox("DXCAM async")
+        self.crop_left = self._make_spinbox()
+        self.crop_top = self._make_spinbox()
+        self.crop_right = self._make_spinbox()
+        self.crop_bottom = self._make_spinbox()
 
         self.backend_combo = QtWidgets.QComboBox()
         self.backend_combo.addItem("MSS", "mss")
@@ -34,40 +46,60 @@ class EffectsWindow(QtWidgets.QWidget):
             self.backend_combo.addItem("WGC", "wgc")
 
         self.effects_combo = QtWidgets.QComboBox()
+        self.effects_combo.addItem("Auto", "auto")
         if has_numpy:
             self.effects_combo.addItem("NumPy", "numpy")
-        self.effects_combo.addItem("Pillow", "pillow")
+        if has_opencv:
+            self.effects_combo.addItem("OpenCV", "opencv")
 
-        self.fps_value = QtWidgets.QLabel("30")
+        self.fps_value = QtWidgets.QLabel("56")
         self.fps_actual = QtWidgets.QLabel("--")
+        self.fps_badge = QtWidgets.QLabel("FPS: --")
+        self.fps_badge.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.scale_value = QtWidgets.QLabel("100%")
 
-        form = QtWidgets.QFormLayout()
-        form.addRow("Luminosite", self.brightness_slider)
-        form.addRow("Contraste", self.contrast_slider)
-        form.addRow("Backend capture", self.backend_combo)
-        form.addRow("Backend effets", self.effects_combo)
-        form.addRow("Mode performance", self.fast_checkbox)
-        form.addRow("Rendu GPU", self.gpu_checkbox)
-        form.addRow("Zone client", self.client_checkbox)
-        form.addRow("DXCAM async", self.dxcam_async_checkbox)
-
+        rec_form = QtWidgets.QFormLayout()
+        rec_form.addRow("Backend capture", self.backend_combo)
+        rec_form.addRow("Mode performance", self.fast_checkbox)
+        rec_form.addRow("Rendu GPU", self.gpu_checkbox)
+        rec_form.addRow("Zone client", self.client_checkbox)
+        rec_form.addRow("DXCAM async", self.dxcam_async_checkbox)
         fps_layout = QtWidgets.QHBoxLayout()
         fps_layout.addWidget(self.fps_slider)
         fps_layout.addWidget(self.fps_value)
         fps_container = QtWidgets.QWidget()
         fps_container.setLayout(fps_layout)
-
         scale_layout = QtWidgets.QHBoxLayout()
         scale_layout.addWidget(self.scale_slider)
         scale_layout.addWidget(self.scale_value)
         scale_container = QtWidgets.QWidget()
         scale_container.setLayout(scale_layout)
+        rec_form.addRow("FPS cible", fps_container)
+        rec_form.addRow("Echelle rendu", scale_container)
+        rec_form.addRow("Rognage (px)", self._build_crop_widget())
+        rec_form.addRow("FPS reel", self.fps_actual)
 
-        form.addRow("FPS cible", fps_container)
-        form.addRow("Echelle rendu", scale_container)
-        form.addRow("FPS reel", self.fps_actual)
-        self.setLayout(form)
+        effects_form = QtWidgets.QFormLayout()
+        effects_form.addRow("Luminosite", self.brightness_slider)
+        effects_form.addRow("Contraste", self.contrast_slider)
+        effects_form.addRow("Backend effets", self.effects_combo)
+
+        rec_widget = QtWidgets.QWidget()
+        rec_widget.setLayout(rec_form)
+        effects_widget = QtWidgets.QWidget()
+        effects_widget.setLayout(effects_form)
+
+        top_bar = QtWidgets.QHBoxLayout()
+        top_bar.addStretch(1)
+        top_bar.addWidget(self.fps_badge)
+
+        main_layout = QtWidgets.QVBoxLayout()
+        main_layout.addLayout(top_bar)
+        main_layout.addWidget(self._make_section("Rec", rec_widget))
+        main_layout.addWidget(self._make_section("Effets", effects_widget))
+        self.setLayout(main_layout)
+
+        self._apply_defaults(has_dxcam, has_numpy, has_gl, has_wgc, has_opencv)
 
         self.brightness_slider.valueChanged.connect(self._emit_effects)
         self.contrast_slider.valueChanged.connect(self._emit_effects)
@@ -77,19 +109,12 @@ class EffectsWindow(QtWidgets.QWidget):
         self.gpu_checkbox.toggled.connect(self._emit_gpu)
         self.client_checkbox.toggled.connect(self._emit_client)
         self.dxcam_async_checkbox.toggled.connect(self._emit_dxcam_async)
+        self.crop_left.valueChanged.connect(self._emit_crop)
+        self.crop_top.valueChanged.connect(self._emit_crop)
+        self.crop_right.valueChanged.connect(self._emit_crop)
+        self.crop_bottom.valueChanged.connect(self._emit_crop)
         self.backend_combo.currentIndexChanged.connect(self._emit_backend)
         self.effects_combo.currentIndexChanged.connect(self._emit_effects_backend)
-
-        self.gpu_checkbox.setEnabled(has_gl)
-        if not has_gl:
-            self.gpu_checkbox.setToolTip("OpenGL indisponible dans cette installation PyQt5.")
-
-        self.dxcam_async_checkbox.setEnabled(has_dxcam)
-        if not has_dxcam:
-            self.dxcam_async_checkbox.setToolTip("DXCAM non installe.")
-
-        self._update_fps_value()
-        self._update_scale_value()
 
     def emit_current(self) -> None:
         self._emit_effects()
@@ -99,6 +124,7 @@ class EffectsWindow(QtWidgets.QWidget):
         self._emit_gpu()
         self._emit_client()
         self._emit_dxcam_async()
+        self._emit_crop()
         self._emit_backend()
         self._emit_effects_backend()
 
@@ -109,6 +135,102 @@ class EffectsWindow(QtWidgets.QWidget):
         slider.setTickPosition(QtWidgets.QSlider.TicksBelow)
         slider.setSingleStep(1)
         return slider
+
+    def _make_spinbox(self) -> QtWidgets.QSpinBox:
+        box = QtWidgets.QSpinBox()
+        box.setRange(0, 10000)
+        box.setSingleStep(1)
+        box.setValue(0)
+        box.setSuffix(" px")
+        return box
+
+    def _build_crop_widget(self) -> QtWidgets.QWidget:
+        grid = QtWidgets.QGridLayout()
+        grid.addWidget(QtWidgets.QLabel("Gauche"), 0, 0)
+        grid.addWidget(self.crop_left, 0, 1)
+        grid.addWidget(QtWidgets.QLabel("Haut"), 0, 2)
+        grid.addWidget(self.crop_top, 0, 3)
+        grid.addWidget(QtWidgets.QLabel("Droite"), 1, 0)
+        grid.addWidget(self.crop_right, 1, 1)
+        grid.addWidget(QtWidgets.QLabel("Bas"), 1, 2)
+        grid.addWidget(self.crop_bottom, 1, 3)
+        grid.setContentsMargins(0, 0, 0, 0)
+        container = QtWidgets.QWidget()
+        container.setLayout(grid)
+        return container
+
+    def _make_section(self, title: str, content: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        toggle = QtWidgets.QToolButton()
+        toggle.setText(title)
+        toggle.setCheckable(True)
+        toggle.setChecked(True)
+        toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        toggle.setArrowType(QtCore.Qt.DownArrow)
+
+        def on_toggled(checked: bool) -> None:
+            toggle.setArrowType(QtCore.Qt.DownArrow if checked else QtCore.Qt.RightArrow)
+            content.setVisible(checked)
+
+        toggle.toggled.connect(on_toggled)
+        on_toggled(True)
+
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(toggle)
+        layout.addWidget(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        container = QtWidgets.QWidget()
+        container.setLayout(layout)
+        return container
+
+    def _set_combo_by_data(self, combo: QtWidgets.QComboBox, value: str) -> None:
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _apply_defaults(
+        self,
+        has_dxcam: bool,
+        has_numpy: bool,
+        has_gl: bool,
+        has_wgc: bool,
+        has_opencv: bool,
+    ) -> None:
+        self.fps_slider.setValue(56)
+        self.scale_slider.setValue(100)
+        self.fast_checkbox.setChecked(True)
+        self.client_checkbox.setChecked(True)
+
+        self.gpu_checkbox.setEnabled(has_gl)
+        if has_gl:
+            self.gpu_checkbox.setChecked(True)
+        else:
+            self.gpu_checkbox.setChecked(False)
+            self.gpu_checkbox.setToolTip("OpenGL indisponible dans cette installation PyQt5.")
+
+        self.dxcam_async_checkbox.setEnabled(has_dxcam)
+        if has_dxcam:
+            self.dxcam_async_checkbox.setChecked(True)
+        else:
+            self.dxcam_async_checkbox.setChecked(False)
+            self.dxcam_async_checkbox.setToolTip("DXCAM non installe.")
+
+        if has_wgc:
+            self._set_combo_by_data(self.backend_combo, "wgc")
+        elif has_dxcam:
+            self._set_combo_by_data(self.backend_combo, "dxcam")
+        else:
+            self._set_combo_by_data(self.backend_combo, "mss")
+
+        if has_numpy:
+            self._set_combo_by_data(self.effects_combo, "numpy")
+        elif has_opencv:
+            self._set_combo_by_data(self.effects_combo, "opencv")
+        else:
+            self._set_combo_by_data(self.effects_combo, "auto")
+
+        self._update_fps_value()
+        self._update_scale_value()
 
     def _emit_effects(self) -> None:
         brightness = self.brightness_slider.value() / 100.0
@@ -141,6 +263,14 @@ class EffectsWindow(QtWidgets.QWidget):
     def _emit_dxcam_async(self) -> None:
         self.dxcam_async_changed.emit(self.dxcam_async_checkbox.isChecked())
 
+    def _emit_crop(self) -> None:
+        self.crop_changed.emit(
+            self.crop_left.value(),
+            self.crop_top.value(),
+            self.crop_right.value(),
+            self.crop_bottom.value(),
+        )
+
     def _emit_backend(self) -> None:
         backend = self.backend_combo.currentData()
         if backend:
@@ -153,4 +283,6 @@ class EffectsWindow(QtWidgets.QWidget):
 
     @QtCore.pyqtSlot(float)
     def set_actual_fps(self, fps: float) -> None:
-        self.fps_actual.setText(f"{fps:.1f}")
+        text = f"{fps:.1f}"
+        self.fps_actual.setText(text)
+        self.fps_badge.setText(f"FPS: {text}")
