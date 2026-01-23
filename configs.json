@@ -12,7 +12,26 @@
         "dilate": 2,
         "enabled": true,
         "erode": 0,
+        "label_color": [
+          220,
+          230,
+          255
+        ],
+        "label_offset": [
+          6,
+          -6
+        ],
+        "label_size": 10,
         "line": 2,
+        "link_color": [
+          120,
+          220,
+          120
+        ],
+        "link_dist": 250,
+        "link_enabled": false,
+        "link_max": 1,
+        "link_width": 1,
         "max_area": 0,
         "max_blobs": 10,
         "max_fps": 15,
@@ -24,9 +43,75 @@
         "scale": 50,
         "show_boxes": true,
         "show_centers": false,
+        "show_labels": false,
         "show_mask": false,
         "skip": 0,
         "threshold": 25
+      },
+      "brightness": 1.0,
+      "capture_backend": "wgc",
+      "client_area": true,
+      "contrast": 1.0,
+      "crop": {
+        "bottom": 0,
+        "left": 0,
+        "right": 0,
+        "top": 0
+      },
+      "dxcam_async": true,
+      "effects_backend": "numpy",
+      "fps": 56,
+      "gpu": true,
+      "performance": true,
+      "scale": 100
+    },
+    "blob1": {
+      "blob": {
+        "alpha": 0.26,
+        "blur": 5,
+        "color": [
+          255,
+          255,
+          255
+        ],
+        "dilate": 2,
+        "enabled": true,
+        "erode": 0,
+        "label_color": [
+          220,
+          230,
+          255
+        ],
+        "label_offset": [
+          56,
+          -6
+        ],
+        "label_size": 10,
+        "line": 2,
+        "link_color": [
+          120,
+          220,
+          120
+        ],
+        "link_dist": 250,
+        "link_enabled": true,
+        "link_max": 1,
+        "link_width": 1,
+        "max_area": 0,
+        "max_blobs": 9,
+        "max_fps": 15,
+        "max_h": 61,
+        "max_w": 73,
+        "min_area": 100,
+        "min_h": 10,
+        "min_w": 10,
+        "scale": 100,
+        "show_boxes": true,
+        "show_centers": true,
+        "show_labels": true,
+        "show_mask": false,
+        "skip": 0,
+        "threshold": 11
       },
       "brightness": 1.0,
       "capture_backend": "wgc",

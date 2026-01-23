@@ -109,6 +109,15 @@ class StreamWindow(QtWidgets.QMainWindow):
             "show_boxes": True,
             "show_centers": False,
             "show_mask": False,
+            "show_labels": False,
+            "label_size": 10,
+            "label_offset": (6, -6),
+            "label_color": (220, 230, 255),
+            "link_enabled": False,
+            "link_max": 1,
+            "link_dist": 250,
+            "link_width": 1,
+            "link_color": (120, 220, 120),
             "line": 2,
             "color": (0, 255, 0),
         }
@@ -848,6 +857,8 @@ class StreamWindow(QtWidgets.QMainWindow):
                 painter.drawLine(cx - 6, cy, cx + 6, cy)
                 painter.drawLine(cx, cy - 6, cx, cy + 6)
 
+        self._draw_blob_links_and_labels(painter, boxes, scale_x, scale_y, 0, 0)
+
         painter.end()
         return out
 
@@ -876,6 +887,15 @@ class StreamWindow(QtWidgets.QMainWindow):
             show_mask,
             self._blob_params.get("show_boxes"),
             self._blob_params.get("show_centers"),
+            self._blob_params.get("show_labels"),
+            self._blob_params.get("label_size"),
+            tuple(self._blob_params.get("label_offset", (6, -6))),
+            tuple(self._blob_params.get("label_color", (220, 230, 255))),
+            self._blob_params.get("link_enabled"),
+            self._blob_params.get("link_max"),
+            self._blob_params.get("link_dist"),
+            self._blob_params.get("link_width"),
+            tuple(self._blob_params.get("link_color", (120, 220, 120))),
             self._blob_params.get("line", 2),
             self._blob_params.get("color", (0, 255, 0)),
         )
@@ -927,10 +947,79 @@ class StreamWindow(QtWidgets.QMainWindow):
                     painter.drawLine(cx - 6, cy, cx + 6, cy)
                     painter.drawLine(cx, cy - 6, cx, cy + 6)
 
+            self._draw_blob_links_and_labels(painter, boxes, scale_x, scale_y, off_x, off_y)
+
         painter.end()
         self._blob_overlay_pixmap = overlay
         self._blob_overlay_params = params
         self._overlay.setPixmap(overlay)
+
+    def _draw_blob_links_and_labels(
+        self,
+        painter: QtGui.QPainter,
+        boxes,
+        scale_x: float,
+        scale_y: float,
+        off_x: int,
+        off_y: int,
+    ) -> None:
+        if not boxes:
+            return
+        centers = []
+        for x, y, w, h in boxes:
+            centers.append((x + w * 0.5, y + h * 0.5))
+
+        if self._blob_params.get("link_enabled"):
+            link_color = self._blob_params.get("link_color", self._blob_params.get("color", (0, 255, 0)))
+            link_width = int(self._blob_params.get("link_width", 1))
+            link_max = int(self._blob_params.get("link_max", 1))
+            link_dist = float(self._blob_params.get("link_dist", 0))
+            pen = QtGui.QPen(QtGui.QColor(*link_color))
+            pen.setWidth(max(1, link_width))
+            painter.setPen(pen)
+            edges = set()
+            for i, (cx, cy) in enumerate(centers):
+                distances = []
+                for j, (cx2, cy2) in enumerate(centers):
+                    if i == j:
+                        continue
+                    dx = cx2 - cx
+                    dy = cy2 - cy
+                    dist = (dx * dx + dy * dy) ** 0.5
+                    if link_dist > 0 and dist > link_dist:
+                        continue
+                    distances.append((dist, j, cx2, cy2))
+                distances.sort(key=lambda v: v[0])
+                for dist, j, cx2, cy2 in distances[: max(1, link_max)]:
+                    key = (min(i, j), max(i, j))
+                    if key in edges:
+                        continue
+                    edges.add(key)
+                    x1 = int(cx * scale_x) + off_x
+                    y1 = int(cy * scale_y) + off_y
+                    x2 = int(cx2 * scale_x) + off_x
+                    y2 = int(cy2 * scale_y) + off_y
+                    painter.drawLine(x1, y1, x2, y2)
+
+        if self._blob_params.get("show_labels"):
+            label_color = self._blob_params.get("label_color", (220, 230, 255))
+            label_size = int(self._blob_params.get("label_size", 10))
+            label_offset = self._blob_params.get("label_offset", (6, -6))
+            try:
+                off_dx = int(label_offset[0])
+                off_dy = int(label_offset[1])
+            except Exception:
+                off_dx, off_dy = 6, -6
+            painter.setPen(QtGui.QColor(*label_color))
+            font = painter.font()
+            font.setPointSize(max(6, label_size))
+            painter.setFont(font)
+            for x, y, w, h in boxes:
+                cx = int(x + w * 0.5)
+                cy = int(y + h * 0.5)
+                px = int(x * scale_x) + off_x + off_dx
+                py = int(y * scale_y) + off_y + off_dy
+                painter.drawText(px, py, f"x:{cx} y:{cy}")
 
     def _fit_viewport(self, frame_w: int, frame_h: int, view_w: int, view_h: int):
         if frame_w <= 0 or frame_h <= 0 or view_w <= 0 or view_h <= 0:
@@ -1149,6 +1238,12 @@ class StreamWindow(QtWidgets.QMainWindow):
                 y0, y1 = ys.min(), ys.max()
                 w = x1 - x0 + 1
                 h = y1 - y0 + 1
+                max_w = params.get("max_w", 0)
+                max_h = params.get("max_h", 0)
+                if max_w > 0 and w > max_w:
+                    return [], mask, prev, bg, skip_count
+                if max_h > 0 and h > max_h:
+                    return [], mask, prev, bg, skip_count
                 area = w * h
                 boxes.append((x0, y0, w, h, area))
 

@@ -1,6 +1,7 @@
 from PyQt5 import QtCore, QtWidgets
 
 from config_store import load_configs, save_configs
+from logger_utils import LOG_PATH
 
 
 class EffectsWindow(QtWidgets.QWidget):
@@ -26,7 +27,7 @@ class EffectsWindow(QtWidgets.QWidget):
     ):
         super().__init__()
         self.setWindowTitle("Reglages (luminosite / contraste)")
-        self.setMinimumWidth(380)
+        self.setMinimumSize(900, 620)
 
         self._configs = load_configs()
         self._loading_profile = False
@@ -70,6 +71,20 @@ class EffectsWindow(QtWidgets.QWidget):
         self.blob_show_boxes = QtWidgets.QCheckBox("Afficher rectangles")
         self.blob_show_centers = QtWidgets.QCheckBox("Afficher centres")
         self.blob_show_mask = QtWidgets.QCheckBox("Afficher masque")
+        self.blob_show_labels = QtWidgets.QCheckBox("Afficher coords")
+        self.blob_label_size = self._make_spinbox(6, 40, 10)
+        self.blob_label_offset_x = self._make_spinbox(-200, 200, 6)
+        self.blob_label_offset_y = self._make_spinbox(-200, 200, -6)
+        self.blob_label_r = self._make_spinbox(0, 255, 220)
+        self.blob_label_g = self._make_spinbox(0, 255, 230)
+        self.blob_label_b = self._make_spinbox(0, 255, 255)
+        self.blob_links = QtWidgets.QCheckBox("Lier blobs")
+        self.blob_link_max = self._make_spinbox(1, 10, 1)
+        self.blob_link_dist = self._make_spinbox(0, 5000, 250)
+        self.blob_link_width = self._make_spinbox(1, 10, 1)
+        self.blob_link_r = self._make_spinbox(0, 255, 120)
+        self.blob_link_g = self._make_spinbox(0, 255, 220)
+        self.blob_link_b = self._make_spinbox(0, 255, 120)
         self.blob_line = self._make_spinbox(1, 10, 2)
         self.blob_r = self._make_spinbox(0, 255, 0)
         self.blob_g = self._make_spinbox(0, 255, 255)
@@ -92,52 +107,50 @@ class EffectsWindow(QtWidgets.QWidget):
         self.fps_value = QtWidgets.QLabel("56")
         self.fps_actual = QtWidgets.QLabel("--")
         self.fps_badge = QtWidgets.QLabel("FPS: --")
+        self.fps_badge.setObjectName("FpsBadge")
         self.fps_badge.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.scale_value = QtWidgets.QLabel("100%")
+        self.title_label = QtWidgets.QLabel("Visuef")
+        self.title_label.setObjectName("Title")
 
-        rec_form = QtWidgets.QFormLayout()
-        rec_form.addRow("Backend capture", self.backend_combo)
-        rec_form.addRow("Mode performance", self.fast_checkbox)
-        rec_form.addRow("Rendu GPU", self.gpu_checkbox)
-        rec_form.addRow("Zone client", self.client_checkbox)
-        rec_form.addRow("DXCAM async", self.dxcam_async_checkbox)
-        fps_layout = QtWidgets.QHBoxLayout()
-        fps_layout.addWidget(self.fps_slider)
-        fps_layout.addWidget(self.fps_value)
-        fps_container = QtWidgets.QWidget()
-        fps_container.setLayout(fps_layout)
-        scale_layout = QtWidgets.QHBoxLayout()
-        scale_layout.addWidget(self.scale_slider)
-        scale_layout.addWidget(self.scale_value)
-        scale_container = QtWidgets.QWidget()
-        scale_container.setLayout(scale_layout)
-        rec_form.addRow("FPS cible", fps_container)
-        rec_form.addRow("Echelle rendu", scale_container)
-        rec_form.addRow("Rognage (px)", self._build_crop_widget())
-        rec_form.addRow("FPS reel", self.fps_actual)
+        self.log_text = QtWidgets.QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_refresh_btn = QtWidgets.QPushButton("Rafraichir log")
 
-        effects_form = QtWidgets.QFormLayout()
-        effects_form.addRow("Luminosite", self.brightness_slider)
-        effects_form.addRow("Contraste", self.contrast_slider)
-        effects_form.addRow("Backend effets", self.effects_combo)
-        effects_form.addRow(self._build_blob_group())
+        self.nav_list = QtWidgets.QListWidget()
+        self.nav_list.setObjectName("Nav")
+        self.nav_list.setFixedWidth(150)
+        self.nav_list.addItems(["Capture", "Effets", "Profils", "Logs"])
+        self.nav_list.setCurrentRow(0)
 
-        profile_widget = self._build_profile_widget()
-
-        rec_widget = QtWidgets.QWidget()
-        rec_widget.setLayout(rec_form)
-        effects_widget = QtWidgets.QWidget()
-        effects_widget.setLayout(effects_form)
+        self.pages = QtWidgets.QStackedWidget()
+        self.pages.addWidget(self._build_capture_page())
+        self.pages.addWidget(self._build_effects_page())
+        self.pages.addWidget(self._build_profiles_page())
+        self.pages.addWidget(self._build_logs_page())
 
         top_bar = QtWidgets.QHBoxLayout()
+        top_bar.addWidget(self.title_label)
         top_bar.addStretch(1)
         top_bar.addWidget(self.fps_badge)
 
-        main_layout = QtWidgets.QVBoxLayout()
-        main_layout.addLayout(top_bar)
-        main_layout.addWidget(profile_widget)
-        main_layout.addWidget(self._make_section("Rec", rec_widget))
-        main_layout.addWidget(self._make_section("Effets", effects_widget))
+        right_layout = QtWidgets.QVBoxLayout()
+        right_layout.addLayout(top_bar)
+        right_layout.addWidget(self.pages)
+
+        right_container = QtWidgets.QWidget()
+        right_container.setLayout(right_layout)
+
+        sidebar = QtWidgets.QFrame()
+        sidebar.setObjectName("Sidebar")
+        side_layout = QtWidgets.QVBoxLayout()
+        side_layout.addWidget(self.nav_list)
+        side_layout.addStretch(1)
+        sidebar.setLayout(side_layout)
+
+        main_layout = QtWidgets.QHBoxLayout()
+        main_layout.addWidget(sidebar)
+        main_layout.addWidget(right_container, 1)
         self.setLayout(main_layout)
 
         self._apply_defaults(has_dxcam, has_numpy, has_gl, has_wgc, has_opencv)
@@ -156,9 +169,11 @@ class EffectsWindow(QtWidgets.QWidget):
         self.crop_bottom.valueChanged.connect(self._emit_crop)
         self.backend_combo.currentIndexChanged.connect(self._emit_backend)
         self.effects_combo.currentIndexChanged.connect(self._emit_effects_backend)
+        self.nav_list.currentRowChanged.connect(self.pages.setCurrentIndex)
         self.profile_combo.currentIndexChanged.connect(self._apply_selected_profile)
         self.profile_save_btn.clicked.connect(self._save_profile)
         self.profile_delete_btn.clicked.connect(self._delete_profile)
+        self.log_refresh_btn.clicked.connect(self._refresh_log_text)
         self.blob_group.toggled.connect(self._emit_blob)
         self.blob_threshold.valueChanged.connect(self._emit_blob)
         self.blob_min_area.valueChanged.connect(self._emit_blob)
@@ -178,6 +193,20 @@ class EffectsWindow(QtWidgets.QWidget):
         self.blob_show_boxes.toggled.connect(self._emit_blob)
         self.blob_show_centers.toggled.connect(self._emit_blob)
         self.blob_show_mask.toggled.connect(self._emit_blob)
+        self.blob_show_labels.toggled.connect(self._emit_blob)
+        self.blob_label_size.valueChanged.connect(self._emit_blob)
+        self.blob_label_offset_x.valueChanged.connect(self._emit_blob)
+        self.blob_label_offset_y.valueChanged.connect(self._emit_blob)
+        self.blob_label_r.valueChanged.connect(self._emit_blob)
+        self.blob_label_g.valueChanged.connect(self._emit_blob)
+        self.blob_label_b.valueChanged.connect(self._emit_blob)
+        self.blob_links.toggled.connect(self._emit_blob)
+        self.blob_link_max.valueChanged.connect(self._emit_blob)
+        self.blob_link_dist.valueChanged.connect(self._emit_blob)
+        self.blob_link_width.valueChanged.connect(self._emit_blob)
+        self.blob_link_r.valueChanged.connect(self._emit_blob)
+        self.blob_link_g.valueChanged.connect(self._emit_blob)
+        self.blob_link_b.valueChanged.connect(self._emit_blob)
         self.blob_line.valueChanged.connect(self._emit_blob)
         self.blob_r.valueChanged.connect(self._emit_blob)
         self.blob_g.valueChanged.connect(self._emit_blob)
@@ -195,6 +224,84 @@ class EffectsWindow(QtWidgets.QWidget):
         self._emit_blob()
         self._emit_backend()
         self._emit_effects_backend()
+
+    def _build_capture_page(self) -> QtWidgets.QWidget:
+        rec_form = QtWidgets.QFormLayout()
+        rec_form.addRow("Backend capture", self.backend_combo)
+        rec_form.addRow("Mode performance", self.fast_checkbox)
+        rec_form.addRow("Rendu GPU", self.gpu_checkbox)
+        rec_form.addRow("Zone client", self.client_checkbox)
+        rec_form.addRow("DXCAM async", self.dxcam_async_checkbox)
+
+        fps_layout = QtWidgets.QHBoxLayout()
+        fps_layout.addWidget(self.fps_slider)
+        fps_layout.addWidget(self.fps_value)
+        fps_container = QtWidgets.QWidget()
+        fps_container.setLayout(fps_layout)
+
+        scale_layout = QtWidgets.QHBoxLayout()
+        scale_layout.addWidget(self.scale_slider)
+        scale_layout.addWidget(self.scale_value)
+        scale_container = QtWidgets.QWidget()
+        scale_container.setLayout(scale_layout)
+
+        rec_form.addRow("FPS cible", fps_container)
+        rec_form.addRow("Echelle rendu", scale_container)
+        rec_form.addRow("Rognage (px)", self._build_crop_widget())
+        rec_form.addRow("FPS reel", self.fps_actual)
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(self._wrap_group("Capture", rec_form))
+        layout.addStretch(1)
+        container.setLayout(layout)
+        return container
+
+    def _build_effects_page(self) -> QtWidgets.QWidget:
+        effects_form = QtWidgets.QFormLayout()
+        effects_form.addRow("Luminosite", self.brightness_slider)
+        effects_form.addRow("Contraste", self.contrast_slider)
+        effects_form.addRow("Backend effets", self.effects_combo)
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(self._wrap_group("Effets rapides", effects_form))
+        layout.addWidget(self._build_blob_group())
+        layout.addStretch(1)
+        container.setLayout(layout)
+        return container
+
+    def _build_profiles_page(self) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.addWidget(self._wrap_group("Profils", self._build_profile_widget()))
+        layout.addStretch(1)
+        container.setLayout(layout)
+        return container
+
+    def _build_logs_page(self) -> QtWidgets.QWidget:
+        header = QtWidgets.QHBoxLayout()
+        header.addWidget(QtWidgets.QLabel("Journal"))
+        header.addStretch(1)
+        header.addWidget(self.log_refresh_btn)
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout()
+        layout.addLayout(header)
+        layout.addWidget(self.log_text)
+        container.setLayout(layout)
+        self._refresh_log_text()
+        return container
+
+    def _wrap_group(self, title: str, content) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox(title)
+        if isinstance(content, QtWidgets.QLayout):
+            group.setLayout(content)
+        else:
+            layout = QtWidgets.QVBoxLayout()
+            layout.addWidget(content)
+            group.setLayout(layout)
+        return group
 
     def _build_profile_widget(self) -> QtWidgets.QWidget:
         grid = QtWidgets.QGridLayout()
@@ -285,16 +392,49 @@ class EffectsWindow(QtWidgets.QWidget):
         grid.addWidget(self.blob_show_boxes, 6, 0)
         grid.addWidget(self.blob_show_centers, 6, 1)
         grid.addWidget(self.blob_show_mask, 6, 2)
-        grid.addWidget(QtWidgets.QLabel("Epaisseur"), 7, 0)
-        grid.addWidget(self.blob_line, 7, 1)
-        grid.addWidget(QtWidgets.QLabel("Couleur RGB"), 7, 2)
+        grid.addWidget(self.blob_show_labels, 6, 3)
+        grid.addWidget(QtWidgets.QLabel("Taille texte"), 7, 0)
+        grid.addWidget(self.blob_label_size, 7, 1)
+        grid.addWidget(QtWidgets.QLabel("Decalage X/Y"), 7, 2)
+        label_offset = QtWidgets.QHBoxLayout()
+        label_offset.addWidget(self.blob_label_offset_x)
+        label_offset.addWidget(self.blob_label_offset_y)
+        label_offset_widget = QtWidgets.QWidget()
+        label_offset_widget.setLayout(label_offset)
+        grid.addWidget(label_offset_widget, 7, 3)
+        grid.addWidget(QtWidgets.QLabel("Couleur texte"), 8, 0)
+        label_colors = QtWidgets.QHBoxLayout()
+        label_colors.addWidget(self.blob_label_r)
+        label_colors.addWidget(self.blob_label_g)
+        label_colors.addWidget(self.blob_label_b)
+        label_colors_widget = QtWidgets.QWidget()
+        label_colors_widget.setLayout(label_colors)
+        grid.addWidget(label_colors_widget, 8, 1, 1, 3)
+        grid.addWidget(self.blob_links, 9, 0)
+        grid.addWidget(QtWidgets.QLabel("Liens max"), 9, 1)
+        grid.addWidget(self.blob_link_max, 9, 2)
+        grid.addWidget(QtWidgets.QLabel("Dist max"), 10, 0)
+        grid.addWidget(self.blob_link_dist, 10, 1)
+        grid.addWidget(QtWidgets.QLabel("Epaisseur lien"), 10, 2)
+        grid.addWidget(self.blob_link_width, 10, 3)
+        grid.addWidget(QtWidgets.QLabel("Couleur liens"), 11, 0)
+        link_colors = QtWidgets.QHBoxLayout()
+        link_colors.addWidget(self.blob_link_r)
+        link_colors.addWidget(self.blob_link_g)
+        link_colors.addWidget(self.blob_link_b)
+        link_colors_widget = QtWidgets.QWidget()
+        link_colors_widget.setLayout(link_colors)
+        grid.addWidget(link_colors_widget, 11, 1, 1, 3)
+        grid.addWidget(QtWidgets.QLabel("Epaisseur"), 12, 0)
+        grid.addWidget(self.blob_line, 12, 1)
+        grid.addWidget(QtWidgets.QLabel("Couleur RGB"), 12, 2)
         colors = QtWidgets.QHBoxLayout()
         colors.addWidget(self.blob_r)
         colors.addWidget(self.blob_g)
         colors.addWidget(self.blob_b)
         colors_widget = QtWidgets.QWidget()
         colors_widget.setLayout(colors)
-        grid.addWidget(colors_widget, 7, 3)
+        grid.addWidget(colors_widget, 12, 3)
         grid.setContentsMargins(4, 4, 4, 4)
         self.blob_group.setLayout(grid)
         return self.blob_group
@@ -334,6 +474,14 @@ class EffectsWindow(QtWidgets.QWidget):
             if idx >= 0:
                 self.profile_combo.setCurrentIndex(idx)
         self.profile_combo.blockSignals(False)
+
+    def _refresh_log_text(self) -> None:
+        try:
+            with open(LOG_PATH, "r", encoding="utf-8") as f:
+                data = f.read()
+        except Exception:
+            data = "(log indisponible)"
+        self.log_text.setPlainText(data)
 
     def _set_combo_data(self, combo: QtWidgets.QComboBox, value: str) -> None:
         if value is None:
@@ -416,9 +564,17 @@ class EffectsWindow(QtWidgets.QWidget):
         self.blob_show_boxes.setChecked(True)
         self.blob_show_centers.setChecked(False)
         self.blob_show_mask.setChecked(False)
+        self.blob_show_labels.setChecked(False)
         self.blob_fps.setValue(15)
         self.blob_max_w.setValue(0)
         self.blob_max_h.setValue(0)
+        self.blob_label_size.setValue(10)
+        self.blob_label_offset_x.setValue(6)
+        self.blob_label_offset_y.setValue(-6)
+        self.blob_links.setChecked(False)
+        self.blob_link_max.setValue(1)
+        self.blob_link_dist.setValue(250)
+        self.blob_link_width.setValue(1)
 
     def _collect_settings(self) -> dict:
         return {
@@ -453,15 +609,24 @@ class EffectsWindow(QtWidgets.QWidget):
                 "scale": self.blob_scale.value(),
                 "max_blobs": self.blob_max_blobs.value(),
                 "skip": self.blob_skip.value(),
-                "max_fps": self.blob_fps.value(),
-                "alpha": self.blob_alpha.value() / 100.0,
-                "show_boxes": self.blob_show_boxes.isChecked(),
-                "show_centers": self.blob_show_centers.isChecked(),
-                "show_mask": self.blob_show_mask.isChecked(),
-                "line": self.blob_line.value(),
-                "color": [self.blob_r.value(), self.blob_g.value(), self.blob_b.value()],
-            },
-        }
+            "max_fps": self.blob_fps.value(),
+            "alpha": self.blob_alpha.value() / 100.0,
+            "show_boxes": self.blob_show_boxes.isChecked(),
+            "show_centers": self.blob_show_centers.isChecked(),
+            "show_mask": self.blob_show_mask.isChecked(),
+            "show_labels": self.blob_show_labels.isChecked(),
+            "label_size": self.blob_label_size.value(),
+            "label_offset": [self.blob_label_offset_x.value(), self.blob_label_offset_y.value()],
+            "label_color": [self.blob_label_r.value(), self.blob_label_g.value(), self.blob_label_b.value()],
+            "link_enabled": self.blob_links.isChecked(),
+            "link_max": self.blob_link_max.value(),
+            "link_dist": self.blob_link_dist.value(),
+            "link_width": self.blob_link_width.value(),
+            "link_color": [self.blob_link_r.value(), self.blob_link_g.value(), self.blob_link_b.value()],
+            "line": self.blob_line.value(),
+            "color": [self.blob_r.value(), self.blob_g.value(), self.blob_b.value()],
+        },
+    }
 
     def _apply_settings(self, settings: dict) -> None:
         if not isinstance(settings, dict):
@@ -508,6 +673,35 @@ class EffectsWindow(QtWidgets.QWidget):
             self._set_checked(self.blob_show_boxes, blob.get("show_boxes", self.blob_show_boxes.isChecked()))
             self._set_checked(self.blob_show_centers, blob.get("show_centers", self.blob_show_centers.isChecked()))
             self._set_checked(self.blob_show_mask, blob.get("show_mask", self.blob_show_mask.isChecked()))
+            self._set_checked(self.blob_show_labels, blob.get("show_labels", self.blob_show_labels.isChecked()))
+            self._set_spin_value(self.blob_label_size, int(blob.get("label_size", self.blob_label_size.value())))
+            label_offset = blob.get(
+                "label_offset",
+                [self.blob_label_offset_x.value(), self.blob_label_offset_y.value()],
+            )
+            if isinstance(label_offset, (list, tuple)) and len(label_offset) == 2:
+                self._set_spin_value(self.blob_label_offset_x, int(label_offset[0]))
+                self._set_spin_value(self.blob_label_offset_y, int(label_offset[1]))
+            label_color = blob.get(
+                "label_color",
+                [self.blob_label_r.value(), self.blob_label_g.value(), self.blob_label_b.value()],
+            )
+            if isinstance(label_color, (list, tuple)) and len(label_color) == 3:
+                self._set_spin_value(self.blob_label_r, int(label_color[0]))
+                self._set_spin_value(self.blob_label_g, int(label_color[1]))
+                self._set_spin_value(self.blob_label_b, int(label_color[2]))
+            self._set_checked(self.blob_links, blob.get("link_enabled", self.blob_links.isChecked()))
+            self._set_spin_value(self.blob_link_max, int(blob.get("link_max", self.blob_link_max.value())))
+            self._set_spin_value(self.blob_link_dist, int(blob.get("link_dist", self.blob_link_dist.value())))
+            self._set_spin_value(self.blob_link_width, int(blob.get("link_width", self.blob_link_width.value())))
+            link_color = blob.get(
+                "link_color",
+                [self.blob_link_r.value(), self.blob_link_g.value(), self.blob_link_b.value()],
+            )
+            if isinstance(link_color, (list, tuple)) and len(link_color) == 3:
+                self._set_spin_value(self.blob_link_r, int(link_color[0]))
+                self._set_spin_value(self.blob_link_g, int(link_color[1]))
+                self._set_spin_value(self.blob_link_b, int(link_color[2]))
             self._set_spin_value(self.blob_line, int(blob.get("line", self.blob_line.value())))
             color = blob.get("color", [self.blob_r.value(), self.blob_g.value(), self.blob_b.value()])
             if isinstance(color, (list, tuple)) and len(color) == 3:
@@ -601,6 +795,23 @@ class EffectsWindow(QtWidgets.QWidget):
             "show_boxes": self.blob_show_boxes.isChecked(),
             "show_centers": self.blob_show_centers.isChecked(),
             "show_mask": self.blob_show_mask.isChecked(),
+            "show_labels": self.blob_show_labels.isChecked(),
+            "label_size": self.blob_label_size.value(),
+            "label_offset": (self.blob_label_offset_x.value(), self.blob_label_offset_y.value()),
+            "label_color": (
+                self.blob_label_r.value(),
+                self.blob_label_g.value(),
+                self.blob_label_b.value(),
+            ),
+            "link_enabled": self.blob_links.isChecked(),
+            "link_max": self.blob_link_max.value(),
+            "link_dist": self.blob_link_dist.value(),
+            "link_width": self.blob_link_width.value(),
+            "link_color": (
+                self.blob_link_r.value(),
+                self.blob_link_g.value(),
+                self.blob_link_b.value(),
+            ),
             "line": self.blob_line.value(),
             "color": (self.blob_r.value(), self.blob_g.value(), self.blob_b.value()),
         }
